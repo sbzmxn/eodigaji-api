@@ -1,0 +1,19 @@
+# 비밀정보
+.env
+
+# 실행 중 생성되는 캐시·보고서 (관광 API 원본 데이터, 측정 결과)
+/data/
+/reports/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# 기타
+*.log
+.DS_Store
+.idea/
+.vscode/

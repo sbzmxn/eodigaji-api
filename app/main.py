@@ -1,0 +1,196 @@
+"""어디가지? 추천 서버 (FastAPI).
+
+실행: uvicorn app.main:app --host 0.0.0.0 --port 8000
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import random
+import time
+from datetime import datetime
+from typing import Callable, Optional
+
+from fastapi import FastAPI, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+from .alias import AliasGenerator, build_region_words, build_type_words
+from .audit import AuditSink, LogSink, RequestMeta
+from .cache import DiskCache
+from .config import Settings, get_settings
+from .recommend import ApiError, Recommender, new_request_id
+from .schemas import ERROR_CODES, ErrorResponse, KeywordsResponse, RecommendRequest, RecommendResponse
+from .spots import DetailService, IndexManager
+from .tour_client import TourClient
+
+log = logging.getLogger("eodigaji")
+RENAMED_MSG = "available_minutes는 drive_minutes(편도 운전 시간, 분)로 변경됐어요"
+
+
+# ---- 로깅: 좌표·쿼리·키가 남지 않게 ----------------------------------------
+class AccessLogSanitizer(logging.Filter):
+    """uvicorn access log 에서 쿼리 문자열과 클라이언트 주소를 지운다."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5:
+            client, method, path, ver, status = args
+            record.args = ("-", method, str(path).split("?", 1)[0], ver, status)
+        return True
+
+
+def configure_logging(level: str = "INFO") -> None:
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.getLogger("eodigaji").setLevel(level)
+    # httpx/httpcore 는 INFO 에서 전체 URL(serviceKey 포함)을 찍으므로 올려 둔다
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    acc = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, AccessLogSanitizer) for f in acc.filters):
+        acc.addFilter(AccessLogSanitizer())
+
+
+def _error(code: str, message: str, rid: str) -> JSONResponse:
+    return JSONResponse(status_code=ERROR_CODES.get(code, 400),
+                        content={"error": {"code": code, "message": message, "request_id": rid}})
+
+
+def create_app(
+    settings: Optional[Settings] = None,
+    *,
+    index: Optional[IndexManager] = None,
+    details: Optional[DetailService] = None,
+    alias: Optional[AliasGenerator] = None,
+    now_fn: Optional[Callable[[], datetime]] = None,
+    rng: Optional[random.Random] = None,
+    sink: Optional[AuditSink] = None,
+    load_on_startup: bool = True,
+) -> FastAPI:
+    s = settings or get_settings()
+    configure_logging(s.log_level)
+    cache = DiskCache(s.cache_dir)
+    tour = TourClient(s) if (index is None or details is None) else None
+    index = index or IndexManager(s, tour, cache)
+    details = details or DetailService(s, tour, cache)
+    rng = rng or random.Random(s.random_seed)
+    alias = alias or AliasGenerator(s.alias, build_type_words(s.alias, s.keywords, {}), rng=rng, mode=s.alias_mode)
+    rec = Recommender(s, index, details, alias, now_fn=now_fn, rng=rng)
+    sink = sink or LogSink()
+
+    async def warm_up() -> None:
+        ref = await index.load_ref()
+        alias.set_base_words(build_type_words(s.alias, s.keywords, ref.lcls_names)
+                             | build_region_words(ref.region_names))
+        await index.ensure_index()
+
+    async def refresher() -> None:
+        while True:
+            # Ollama keep_alive(30m)보다 짧은 주기로 모델을 붙잡아 두고, 인덱스는 TTL(하루) 지났을 때만 수집
+            await alias.warm()
+            with contextlib.suppress(Exception):
+                await index.ensure_index()
+            await asyncio.sleep(20 * 60)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        task = None
+        if load_on_startup:
+            try:
+                await warm_up()
+            except Exception as e:  # noqa: BLE001  기동은 계속 (요청 시 재시도)
+                log.warning("warm-up failed: %s", type(e).__name__)
+            task = asyncio.create_task(refresher())
+        yield
+        if task:
+            task.cancel()
+        if tour:
+            await tour.aclose()
+        await alias.aclose()
+
+    app = FastAPI(title="어디가지? 추천 서버", version="0.1.0", lifespan=lifespan)
+    app.state.recommender = rec
+    app.state.index = index
+
+    @app.middleware("http")
+    async def request_meta(request: Request, call_next):
+        rid = new_request_id()
+        request.state.meta = RequestMeta(request_id=rid, endpoint=request.url.path)
+        t0 = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception as exc:  # noqa: BLE001  내부 오류도 같은 에러 스키마 + 요청 로그로
+            log.error("unhandled %s rid=%s", type(exc).__name__, rid)
+            request.state.meta.result_code = "INTERNAL_ERROR"
+            response = _error("INTERNAL_ERROR", "서버 내부 오류", rid)
+        meta: RequestMeta = request.state.meta
+        meta.elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        if response.status_code >= 400 and meta.result_code == "OK":
+            meta.result_code = f"HTTP_{response.status_code}"
+        if request.url.path.startswith("/api/"):
+            sink.record(meta)
+        return response
+
+    @app.exception_handler(ApiError)
+    async def api_error(request: Request, exc: ApiError):
+        request.state.meta.result_code = exc.code
+        return _error(exc.code, exc.message, request.state.meta.request_id)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        # 입력값을 응답·로그에 되돌려 주지 않는다 (pydantic 기본 응답에는 input 이 들어 있음)
+        locs = {str(p) for e in exc.errors() for p in e.get("loc", ())}
+        if isinstance(exc.body, dict) and "available_minutes" in exc.body:
+            code, msg = "INVALID_REQUEST", RENAMED_MSG
+        elif locs & {"keyword_ids"}:
+            code, msg = "INVALID_KEYWORD", "keyword_ids 는 정의된 키워드 중 0~3개여야 합니다"
+        elif locs & {"latitude", "longitude", "lat", "lng"}:
+            code, msg = "INVALID_LOCATION", "위도·경도가 올바르지 않습니다"
+        else:
+            fields = sorted(locs - {"body", "query"})
+            code, msg = "INVALID_REQUEST", f"요청 형식이 올바르지 않습니다: {', '.join(fields)}"
+        request.state.meta.result_code = code
+        return _error(code, msg, request.state.meta.request_id)
+
+    errors = {s: {"model": ErrorResponse} for s in sorted(set(ERROR_CODES.values()))}
+
+    @app.get("/api/v1/keywords", response_model=KeywordsResponse, responses=errors)
+    async def keywords(request: Request, lat: float = Query(...), lng: float = Query(...),
+                       drive_minutes: int = Query(...)):
+        res = await rec.keywords_status(lat, lng, drive_minutes)
+        request.state.meta.n_candidates = res.pop("_n")
+        res.pop("_counts", None)
+        return {"request_id": request.state.meta.request_id, **res}
+
+    @app.post("/api/v1/recommend", response_model=RecommendResponse, responses=errors)
+    async def recommend(request: Request, body: RecommendRequest):
+        extras = sorted(body.model_extra or {})
+        if "available_minutes" in extras:
+            raise ApiError("INVALID_REQUEST", RENAMED_MSG)
+        if extras:  # 정의 안 된 필드는 무시. 필드 '이름'만 남기고 값은 남기지 않는다
+            log.warning("ignored fields rid=%s: %s", request.state.meta.request_id,
+                        ",".join(e[:30] for e in extras[:5]))
+        out = await rec.recommend(body.latitude, body.longitude, body.drive_minutes,
+                                  body.keyword_ids, body.exclude_content_ids)
+        meta: RequestMeta = request.state.meta
+        meta.n_candidates = out.n_candidates
+        meta.alias_source = out.alias_source
+        return {"request_id": meta.request_id, **out.body}
+
+    @app.get("/healthz")
+    async def healthz():
+        idx = index.index
+        return {"status": "ok", "index_spots": len(idx.spots) if idx else 0,
+                "index_age_min": int((time.time() - idx.loaded_at) / 60) if idx else None}
+
+    return app
+
+
+def __getattr__(name: str):
+    # `uvicorn app.main:app` 에서만 실제 앱을 만든다 (테스트 import 시 부작용 방지)
+    if name == "app":
+        global app
+        app = create_app()
+        return app
+    raise AttributeError(name)
