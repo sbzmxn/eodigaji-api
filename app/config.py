@@ -89,22 +89,14 @@ class SeasonRule(BaseModel):
 
 
 class AliasCfg(BaseModel):
-    ollama_url: str = "http://localhost:11434"
-    model: str = "llama3.2:1b"
-    timeout_s: float = 8
-    max_retries: int = 2
-    temperature: float = 1.0
     min_len: int = 5
     max_len: int = 20
-    recent_size: int = 20
+    recent_size: int = 10            # 최근에 고른 가명을 피할 개수 (메모리에만)
     # config/alias.yaml
-    moods: list[str] = Field(default_factory=list)
     extra_forbidden: list[str] = Field(default_factory=list)
     allow_words: list[str] = Field(default_factory=list)
-    templates: list[str] = Field(default_factory=list)
-    # 조합형 템플릿: 시간대 수식어(any + 오전/오후/저녁/밤) × 감성 명사
-    template_modifiers: dict[str, list[str]] = Field(default_factory=dict)
-    template_nouns: list[str] = Field(default_factory=list)
+    # config/alias_pool.yaml
+    pool: list[str] = Field(default_factory=list)
 
 
 class Landmass(BaseModel):
@@ -149,7 +141,6 @@ class Settings(BaseModel):
     timezone: str = "Asia/Seoul"
     random_seed: Optional[int] = None
     log_level: str = "INFO"
-    alias_mode: Literal["template", "llm"] = "template"
     landmasses: list[Landmass] = Field(default_factory=list)
     origin_landmass_max_km: float = 15.0
     tour_api: TourApiCfg = Field(default_factory=TourApiCfg)
@@ -199,6 +190,7 @@ def load_settings(config_dir: Path = CONFIG_DIR, env_file: Optional[Path] = ROOT
     raw["keywords"] = kw_raw
     alias = raw.setdefault("alias", {})
     alias.update(_read_yaml(config_dir / "alias.yaml"))
+    alias["pool"] = (_read_yaml(config_dir / "alias_pool.yaml").get("names") or [])
     env = read_env_file(env_file) if env_file else {}
     raw["tour_kor_key"] = os.environ.get("TOURAPI_KOR_KEY") or env.get("TOURAPI_KOR_KEY", "")
     return Settings.model_validate(raw)

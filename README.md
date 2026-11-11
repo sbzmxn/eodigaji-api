@@ -9,14 +9,14 @@
 | 경로 | 내용 |
 |---|---|
 | `app/` | 서버 코드 (API, 추천 흐름, 관광 API 클라이언트, 점수·일몰·가명·캐시) |
-| `config/` | 튜닝 값: `settings.yaml`(반경·점수·시간 구간·섬 규칙·가명 모드), `keywords.yaml`(키워드↔관광 분류), `alias.yaml`(가명 템플릿·금지어) |
+| `config/` | 튜닝 값: `settings.yaml`(반경·점수·시간 구간·섬 규칙), `keywords.yaml`(키워드↔관광 분류), `alias_pool.yaml`(검수된 가명 100개), `alias.yaml`(가명 금지어 규칙) |
 | `tests/` | 단위 테스트(mock), 실제 API 통합 테스트(`-m integration`), 테스트 데이터(출발 좌표 7곳 등) |
-| `scripts/` | `demo_call.sh`(시연 호출), `check_locations.py`(7곳 점검), `alias_quality.py`(가명 품질 측정) |
-| `docs/` | `API_FOR_APP.md`(앱 팀용 API 명세), `EVALUATION.md`(평가 결과) |
+| `scripts/` | `demo_call.sh`(시연 호출), `check_locations.py`(7곳 점검), `generate_alias_pool.py`(가명 후보 일회성 생성, Ollama 필요) |
+| `docs/` | `API_FOR_APP.md`(앱 팀용 API 명세), `BlindNames.kt`(앱용 가명 100개), `TEAM_HANDOFF.md`(팀원별 연동), `GIT_GUIDE.md`(저장소 사용법), `EVALUATION.md`(평가 결과) |
 
 ## 빠른 시작
 
-기본 설정(`alias_mode: template`)은 LLM 을 쓰지 않으므로 **GPU·Ollama 없이** 실행됩니다. Python 3.10 기준입니다.
+서버는 실행 중 LLM 을 쓰지 않으므로 **GPU·Ollama 없이** 실행됩니다. Python 3.10 기준입니다.
 
 ```bash
 python3.10 -m venv .venv && source .venv/bin/activate
@@ -33,7 +33,8 @@ scripts/demo_call.sh 37.4979 127.0276 30 forest,walk
 BASE=https://xxxx.ngrok-free.app scripts/demo_call.sh 33.4996 126.5312 45
 ```
 
-LLM 가명을 쓰려면 `config/settings.yaml` 에서 `alias_mode: llm` 으로 바꾸고 Ollama 에 모델을 받아 둡니다(`ollama pull llama3.2:1b`, 모델명은 `alias.model`). LLM 이 실패하면 템플릿으로 대체되며 에러가 되지 않습니다.
+가명은 팀이 검수한 100개 목록(`config/alias_pool.yaml`)에서 고릅니다. 앱은 같은 목록을 [`docs/BlindNames.kt`](docs/BlindNames.kt)로 직접 쓰며, 서버 응답의 `blind_name` 은 호환용입니다.
+서버는 시작할 때 목록 전체를 금지어(장소 유형어·지명·읍면동 등)로 검사하고, 하나라도 걸리면 그 이름을 로그에 남기고 시작하지 않습니다.
 
 ## .env 설정
 
@@ -48,7 +49,7 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 | 메서드 | 경로 | 용도 |
 |---|---|---|
 | GET | `/api/v1/keywords?lat=&lng=&drive_minutes=` | 키워드 8개의 활성 여부와 비활성 사유 (예: `"지금 시간으론 멀어요"`, `"일몰은 17:25이에요"`) |
-| POST | `/api/v1/recommend` | 장소 1곳 추천: 가명, 목적지 좌표, 힌트(주차·요금·도착 시 운영), 도착 후 공개 정보 |
+| POST | `/api/v1/recommend` | 장소 1곳 추천: 목적지 좌표, 힌트(주차·요금·도착 시 운영), 도착 후 공개 정보 (+ 호환용 가명) |
 | GET | `/healthz` | 관광지 인덱스 적재 상태 |
 
 ```json
@@ -70,11 +71,11 @@ FastAPI 자동 문서: 서버 실행 후 `/docs`.
 pytest                               # 단위 테스트 (네트워크·GPU 불필요). API 테스트는 출발 좌표 7곳 각각에서 실행
 pytest -m integration                # 실제 관광 API 통합 테스트 (.env 키 필요)
 python scripts/check_locations.py    # 7곳 × 15·30·60·120분 점검 → reports/locations_check.md
-python scripts/alias_quality.py --model qwen2.5:7b   # LLM 가명 품질 측정 → reports/ (Ollama 필요)
+python scripts/generate_alias_pool.py --model qwen2.5:7b   # 가명 후보 생성(일회성, Ollama 필요) → reports/
 ```
 
 `reports/` 와 `data/` 는 실행 시 자동으로 만들어지며 git 에서 제외됩니다.
 
 ## 평가 결과
 
-7곳 × 4개 운전 시간 점검(56/56 정상), 섬 규칙, 가명 모델 3종 비교와 라이선스, 개인정보 검증: **[docs/EVALUATION.md](docs/EVALUATION.md)**
+7곳 × 4개 운전 시간 점검(56/56 정상), 섬 규칙, 가명 목록 생성·검수, 개인정보 검증: **[docs/EVALUATION.md](docs/EVALUATION.md)**

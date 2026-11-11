@@ -1,24 +1,20 @@
-"""블라인드 가명 생성 (Ollama) + 코드 검증 + 템플릿 폴백.
+"""블라인드 가명: 사람이 검수한 100개 목록(config/alias_pool.yaml)에서 무작위로 고른다. 실행 중 LLM 은 쓰지 않는다.
 
 원칙: 가명으로 목적지를 예측할 수 없어야 한다.
-- LLM 입력: 시간대(오전/오후/저녁/밤), '힐링' 분위기, 무작위 느낌 단어. 장소명·소개·분류·키워드는 넣지 않는다.
-- 금지어: 실제 장소명과 그 구성(2글자 조각), 지명(시·도·시·군·구 이름과 어간, 주소의 동·읍·면·리),
-  장소 유형어(키워드 표시어·매칭 단어, 신분류 이름 전체, config/alias.yaml extra_forbidden).
-- 실패 시 최대 max_retries 회 재시도, 전체 시간 예산 timeout_s. 그래도 실패하면 템플릿 풀에서 무작위.
+- 금지어 검증: 장소 유형어(키워드 표시어·매칭 단어, 신분류 이름 전체, config/alias.yaml extra_forbidden)와
+  시·도·시·군·구 이름(부분 문자열), 읍·면·동·리 이름과 어간(어절 단위), 한글·공백 5~20자, 같은 어절 반복 금지.
+- 서버 시작 시 목록 전체를 검증하고 하나라도 걸리면 시작하지 않는다.
+- 고를 때는 선택된 장소의 실제 이름 조각·주소의 동 이름과 겹치는 가명, 최근 N개(메모리에만)를 피한다.
+- 목록 후보는 scripts/generate_alias_pool.py 로 한 번 생성해 팀이 검수했다. 앱도 같은 목록(docs/BlindNames.kt)을 쓴다.
 """
 from __future__ import annotations
 
-import json
 import logging
 import random
 import re
-import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Iterable, Optional
-
-import httpx
 
 from .config import AliasCfg, KeywordsCfg
 from .spots import Spot
@@ -29,34 +25,9 @@ _HANGUL_RUN = re.compile(r"[가-힣]+")
 _SPLIT = re.compile(r"[/,·‧ㆍ.()\[\]\s]+")
 _REGION_SUFFIX = re.compile(r"(통합특별시|특별자치시|특별자치도|특별시|광역시|자치시|자치도|도|시|군|구)$")
 _ADDR_UNIT = re.compile(r"^[가-힣0-9]+(동|읍|면|리|가)$")
+_UNIT_NAME = re.compile(r"^([가-힣]{1,8})(동|읍|면|리|가)$")
 _JOSA = sorted(["의", "에", "에서", "로", "으로", "은", "는", "이", "가", "을", "를", "과", "와", "도", "만", "까지", "처럼"],
                key=len, reverse=True)
-
-SCHEMA = {
-    "type": "object",
-    "properties": {"blind_name": {"type": "string"}},
-    "required": ["blind_name"],
-}
-
-SYSTEM_PROMPT = (
-    "너는 '어디가지?' 드라이브 앱의 작명가다. 목적지를 숨긴 채 떠나는 드라이브에 붙일 짧은 한국어 이름을 하나 짓는다.\n"
-    "규칙:\n"
-    "1) 장소의 종류(바다, 강, 호수, 숲, 산, 공원, 절, 전망대, 계곡, 마을 등), 지명, 풍경, 날씨를 떠올리게 하는 단어는 절대 쓰지 않는다.\n"
-    "2) '비밀의 공간', '오늘의 힐링 공간', '아직 이름 없는 쉼표'처럼 추상적이고 따뜻한 표현만 쓴다.\n"
-    "3) 한글만 쓰고 5~20자로 짓는다. 숫자, 영어, 이모지, 따옴표는 쓰지 않는다.\n"
-    '4) {"blind_name": "..."} 형식의 JSON 하나만 출력한다.'
-)
-
-
-def time_of_day(dt: datetime) -> str:
-    h = dt.hour
-    if 5 <= h < 11:
-        return "오전"
-    if 11 <= h < 17:
-        return "오후"
-    if 17 <= h < 20:
-        return "저녁"
-    return "밤"
 
 
 # ---- 금지어 사전 ----------------------------------------------------------
@@ -81,6 +52,19 @@ def build_region_words(region_names: Iterable[str]) -> set[str]:
         stem = _REGION_SUFFIX.sub("", n)
         if len(stem) >= 2:
             out.add(stem)
+    return out
+
+
+def build_unit_words(spots: Iterable[Spot]) -> set[str]:
+    """관광지 주소에서 읍·면·동·리 이름과 어간(2글자 이상). 어절 단위로만 검사한다."""
+    out: set[str] = set()
+    for s in spots:
+        for tok in re.split(r"[\s()\[\],]+", f"{s.addr1} {s.addr2}"):
+            m = _UNIT_NAME.match(tok)
+            if m and len(tok) >= 2:
+                out.add(tok)
+                if len(m.group(1)) >= 2:
+                    out.add(m.group(1))
     return out
 
 
@@ -109,8 +93,9 @@ def _strip_josa(tok: str) -> str:
 
 @dataclass
 class Lexicon:
-    words: set[str]
+    words: set[str]                                          # 부분 문자열로 검사 (장소 유형어, 시·도·시·군·구)
     allow: list[str] = field(default_factory=list)
+    token_words: set[str] = field(default_factory=set)       # 어절 단위로 검사 (읍·면·동·리 이름과 어간)
 
     def violation(self, name: str) -> Optional[str]:
         masked = name
@@ -126,6 +111,11 @@ class Lexicon:
             for c in {tok[0], core[0], core[-1]}:
                 if c in singles:
                     return c
+            plural = core[:-1] if len(core) > 1 and core.endswith("들") else core
+            if tok in self.token_words or core in self.token_words or plural in self.token_words:
+                return core
+            if len(plural) < len(core) and (plural[0] in singles or plural[-1] in singles):
+                return plural
         return None
 
 
@@ -149,116 +139,50 @@ def validate(name: object, lex: Lexicon, cfg: AliasCfg, recent: Iterable[str] = 
     return n, None
 
 
-# ---- 생성기 ---------------------------------------------------------------
-@dataclass
-class AliasResult:
-    name: str
-    source: str                      # "llm" | "template"
-    attempts: int = 0
-    reasons: list[str] = field(default_factory=list)
+# ---- 목록에서 고르기 --------------------------------------------------------
+class AliasPoolError(ValueError):
+    """가명 목록이 검증을 통과하지 못함 → 서버를 시작하지 않는다."""
 
 
-class AliasGenerator:
-    def __init__(self, cfg: AliasCfg, base_words: set[str], client: Optional[httpx.AsyncClient] = None,
-                 rng: Optional[random.Random] = None, mode: str = "llm"):
+class AliasPool:
+    def __init__(self, cfg: AliasCfg, base_words: set[str], rng: Optional[random.Random] = None):
         self.cfg = cfg
-        self.mode = mode                 # "template" 이면 LLM 을 부르지 않는다
         self.base_words = base_words
-        self._client = client or httpx.AsyncClient()
+        self.unit_words: set[str] = set()
         self.rng = rng or random.Random()
-        self.recent: deque[str] = deque(maxlen=cfg.recent_size)
+        self.recent: deque[str] = deque(maxlen=cfg.recent_size)   # 메모리에만, 저장하지 않음
 
-    def set_base_words(self, words: set[str]) -> None:
-        self.base_words = words
+    def lexicon(self) -> Lexicon:
+        return Lexicon(self.base_words, self.cfg.allow_words, self.unit_words)
 
-    async def aclose(self) -> None:
-        await self._client.aclose()
+    def check(self) -> None:
+        """목록 전체를 금지어 검증. 걸리는 이름이 있으면 로그를 남기고 AliasPoolError."""
+        names = self.cfg.pool
+        lex = self.lexicon()
+        bad = [(n, validate(n, lex, self.cfg)[1]) for n in names]
+        bad = [(n, why) for n, why in bad if why]
+        dup = sorted({n for n in names if names.count(n) > 1})
+        if not names:
+            raise AliasPoolError("가명 목록(config/alias_pool.yaml)이 비어 있습니다")
+        if bad or dup:
+            for n, why in bad:
+                log.error("alias pool rejected: %s (%s)", n, why)
+            for n in dup:
+                log.error("alias pool duplicate: %s", n)
+            raise AliasPoolError(f"가명 목록 검증 실패 {len(bad) + len(dup)}건: "
+                                 + ", ".join(f"{n}({w})" for n, w in bad) + (f" 중복 {dup}" if dup else ""))
 
-    async def warm(self) -> bool:
-        """모델을 GPU 메모리에 미리 올린다 (첫 요청이 로딩 시간 때문에 템플릿으로 떨어지지 않게)."""
-        if self.mode != "llm":
-            return False
-        try:
-            r = await self._client.post(f"{self.cfg.ollama_url}/api/generate",
-                                        json={"model": self.cfg.model, "keep_alive": "30m"}, timeout=120)
-            r.raise_for_status()
-            return True
-        except httpx.HTTPError as e:
-            log.warning("ollama warm-up failed: %s", type(e).__name__)
-            return False
+    def update_lexicon(self, base_words: set[str], unit_words: set[str]) -> None:
+        """참조 데이터(신분류·시군구·읍면동)를 받은 뒤 사전을 넓히고 다시 검증한다."""
+        self.base_words = base_words
+        self.unit_words = unit_words
+        self.check()
 
-    def lexicon_for(self, spot: Spot) -> Lexicon:
-        return Lexicon(self.base_words | place_words(spot), self.cfg.allow_words)
-
-    def _prompt(self, arrival: datetime) -> str:
-        mood = self.rng.choice(self.cfg.moods) if self.cfg.moods else "쉼"
-        avoid = ", ".join(list(self.recent)[-3:])
-        p = f"시간대: {time_of_day(arrival)}\n분위기: 힐링\n느낌 단어: {mood}\n"
-        if avoid:
-            p += f"이미 쓴 이름(다시 쓰지 말 것): {avoid}\n"
-        return p + "새 이름을 지어줘."
-
-    async def _ask(self, prompt: str, timeout: float) -> object:
-        r = await self._client.post(
-            f"{self.cfg.ollama_url}/api/generate",
-            json={
-                "model": self.cfg.model,
-                "system": SYSTEM_PROMPT,
-                "prompt": prompt,
-                "format": SCHEMA,
-                "stream": False,
-                "keep_alive": "30m",
-                "options": {"temperature": self.cfg.temperature, "num_predict": 48},
-            },
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        return json.loads(r.json().get("response", "")).get("blind_name")
-
-    async def generate(self, spot: Spot, arrival: datetime) -> AliasResult:
-        deadline = time.monotonic() + self.cfg.timeout_s
-        lex = self.lexicon_for(spot)
-        if self.mode != "llm":
-            return AliasResult(self.template(lex, arrival), "template", 0, ["mode:template"])
-        reasons: list[str] = []
-        attempts = 0
-        for _ in range(1 + self.cfg.max_retries):
-            remaining = deadline - time.monotonic()
-            if remaining < 0.3:
-                reasons.append("budget")
-                break
-            attempts += 1
-            try:
-                raw = await self._ask(self._prompt(arrival), remaining)
-            except httpx.TimeoutException:
-                reasons.append("timeout")
-                break
-            except httpx.TransportError:
-                reasons.append("unavailable")
-                break
-            except (httpx.HTTPStatusError, ValueError, AttributeError) as e:
-                reasons.append(f"bad_response:{type(e).__name__}")
-                continue
-            name, why = validate(raw, lex, self.cfg, self.recent)
-            if name:
-                self.recent.append(name)
-                return AliasResult(name, "llm", attempts, reasons)
-            reasons.append(why or "invalid")
-        name = self.template(lex, arrival)
-        return AliasResult(name, "template", attempts, reasons)
-
-    def template_pool(self, arrival: Optional[datetime] = None) -> list[str]:
-        """고정 템플릿 + (공통·시간대 수식어 × 감성 명사) 조합."""
-        mods = list(self.cfg.template_modifiers.get("any", []))
-        if arrival is not None:
-            mods += self.cfg.template_modifiers.get(time_of_day(arrival), [])
-        combos = [f"{m} {n}" for m in mods for n in self.cfg.template_nouns]
-        return list(dict.fromkeys(self.cfg.templates + combos))
-
-    def template(self, lex: Lexicon, arrival: Optional[datetime] = None) -> str:
-        """금지어 검증을 통과하고 최근에 안 쓴 템플릿을 무작위로 고른다."""
-        pool = [t for t in self.template_pool(arrival) if validate(t, lex, self.cfg)[0]]
-        fresh = [t for t in pool if t not in self.recent] or pool or ["비밀의 공간"]
+    def pick(self, spot: Spot) -> str:
+        """선택된 장소의 이름·동 이름과 겹치지 않고 최근 N개에 없는 이름을 무작위로 고른다."""
+        lex = Lexicon(place_words(spot), self.cfg.allow_words)
+        ok = [n for n in self.cfg.pool if lex.violation(n) is None]
+        fresh = [n for n in ok if n not in self.recent] or ok or list(self.cfg.pool)
         name = self.rng.choice(fresh)
         self.recent.append(name)
         return name

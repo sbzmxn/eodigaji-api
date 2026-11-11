@@ -1,12 +1,14 @@
-import asyncio
-import json
+"""가명: 검수된 100개 목록(config/alias_pool.yaml) + 앱용 docs/BlindNames.kt + 금지어 검증."""
+import logging
+import re
+from pathlib import Path
 
-import httpx
 import pytest
 
-from app.alias import Lexicon, place_words, validate
-from conftest import NOW, base_words, make_alias, make_spot
+from app.alias import AliasPoolError, Lexicon, build_unit_words, place_words, validate
+from conftest import base_words, make_pool, make_spot
 
+ROOT = Path(__file__).resolve().parent.parent
 SPOT = make_spot("126132", "대구앞산공원", addr1="대구광역시 남구 대명동 산227-1")
 
 
@@ -18,29 +20,71 @@ def ok(settings, name, spot=SPOT):
     return validate(name, lex(settings, spot), settings.alias)
 
 
-def run(coro):
-    return asyncio.run(coro)
+# ---- 목록 자체 -------------------------------------------------------------------
+def test_pool_is_100_unique(settings):
+    pool = settings.alias.pool
+    assert len(pool) == 100 and len(set(pool)) == 100
 
 
-# ---- 검증 ----------------------------------------------------------------------
-@pytest.mark.parametrize("hour", [9, 14, 18, 22])
-def test_all_templates_pass(settings, hour):
-    """고정 템플릿 + 시간대별 조합 템플릿 전부가 금지어·길이·반복 검증을 통과한다."""
-    a = make_alias(settings, [])
-    pool = a.template_pool(NOW.replace(hour=hour))
-    assert len(pool) >= 300                                  # 반복을 줄이기 위한 풀 크기
-    bad = [(t, ok(settings, t)[1]) for t in pool if ok(settings, t)[0] != t]
-    assert not bad, bad
+def test_pool_passes_server_validation(settings):
+    """100개 전체를 서버 금지어 검증(장소 유형어·신분류 이름·시군구, 형식·길이·반복)으로 다시 검사한다."""
+    lx = Lexicon(base_words(settings), settings.alias.allow_words)
+    bad = [(n, validate(n, lx, settings.alias)[1]) for n in settings.alias.pool]
+    assert not [b for b in bad if b[1]], [b for b in bad if b[1]]
+    make_pool(settings).check()                       # 서버 시작 검사와 같은 경로
 
 
-def test_template_uses_arrival_time_bucket(settings):
-    a = make_alias(settings, [], seed=1)
-    night = set(a.template_pool(NOW.replace(hour=22)))
-    morning = set(a.template_pool(NOW.replace(hour=9)))
-    assert "늦은 밤의 쉼표" in night and "늦은 밤의 쉼표" not in morning
-    assert "아침을 여는 선물" in morning and "아침을 여는 선물" not in night
+def test_blindnames_kt_matches_pool(settings):
+    """앱용 docs/BlindNames.kt 의 LIST 가 서버 목록과 순서까지 같다."""
+    kt = (ROOT / "docs" / "BlindNames.kt").read_text(encoding="utf-8")
+    body = kt[kt.index("listOf(") : kt.index(")", kt.index("listOf("))]
+    assert re.findall(r'"([^"]+)"', body) == settings.alias.pool
+    assert "fun pick(recent: Collection<String>" in kt
 
 
+# ---- 서버 시작 검사 ----------------------------------------------------------------
+def test_bad_pool_is_rejected_with_names_logged(settings, caplog):
+    settings.alias.pool = ["비밀의 공간", "바다가 보이는 쉼터", "비밀의 공간"]
+    caplog.set_level(logging.ERROR)
+    with pytest.raises(AliasPoolError):
+        make_pool(settings).check()
+    assert "바다가 보이는 쉼터" in caplog.text and "duplicate: 비밀의 공간" in caplog.text
+
+
+def test_unit_words_checked_per_token(settings):
+    """읍·면·동 이름은 어절 단위로만 검사한다 ('평온의'는 '온의동' 어간에 걸리지 않음). '지도'는 예외 단어."""
+    pool = make_pool(settings)
+    settings.alias.pool = ["평온의 작은 쉼", "지도에 없는 쉼표"]
+    pool.update_lexicon(base_words(settings), {"온의", "온의동", "지도", "숨은"})
+    settings.alias.pool = ["숨은 웃음"]                 # '숨은'이 동 이름(어간)과 같은 어절
+    with pytest.raises(AliasPoolError):
+        pool.check()
+
+
+def test_build_unit_words():
+    spots = [make_spot("1", "가", addr1="강원특별자치도 춘천시 온의동 1"), make_spot("2", "나", addr1="전남 신안군 지도읍 읍내리")]
+    w = build_unit_words(spots)
+    assert {"온의동", "온의", "지도읍", "지도", "읍내리", "읍내"} <= w
+
+
+# ---- 고르기 ---------------------------------------------------------------------
+def test_pick_avoids_recent_10(settings):
+    pool = make_pool(settings, seed=3)
+    names = [pool.pick(SPOT) for _ in range(200)]
+    for i in range(len(names)):
+        assert names[i] not in names[max(0, i - settings.alias.recent_size):i]
+    assert set(names) <= set(settings.alias.pool)
+
+
+def test_pick_avoids_spot_name_pieces(settings):
+    spot = make_spot("x", "비밀숲 오늘정원", addr1="가나시 다라구 마바동 1")
+    pool = make_pool(settings, seed=1)
+    for _ in range(300):
+        n = pool.pick(spot)
+        assert "비밀" not in n and "오늘" not in n
+
+
+# ---- 검증 규칙 -------------------------------------------------------------------
 @pytest.mark.parametrize("name", ["비밀의 공간", "오늘의 힐링 공간", "아직 이름 없는 쉼표", "계절이 머무는 쉼표",
                                   "산들거리는 마음 쉼표", "기다리던 작은 선물"])
 def test_abstract_names_allowed(settings, name):
@@ -77,54 +121,8 @@ def test_place_words_bigrams():
     assert {"이월드", "이월", "월드", "타워", "두류동", "두류"} <= w
 
 
-# ---- 생성 ----------------------------------------------------------------------
-def test_llm_success(settings):
-    a = make_alias(settings, ["설렘이 머무는 자리"])
-    r = run(a.generate(SPOT, NOW))
-    assert (r.name, r.source, r.attempts) == ("설렘이 머무는 자리", "llm", 1)
-
-
-def test_retry_then_success(settings):
-    a = make_alias(settings, ["RAW:not json", "앞산의 비밀", "느긋한 오후의 선물"])
-    r = run(a.generate(SPOT, NOW))
-    assert r.source == "llm" and r.attempts == 3 and r.name == "느긋한 오후의 선물"
-    assert r.reasons[0].startswith("bad_response") and r.reasons[1].startswith("forbidden")
-
-
-def test_fallback_after_retries(settings):
-    a = make_alias(settings, ["바다 끝", "대구 쉼표", "공원 산책길"])
-    r = run(a.generate(SPOT, NOW))
-    assert r.source == "template" and r.attempts == 3
-    assert r.name in a.template_pool(NOW)
-
-
-@pytest.mark.parametrize("exc,reason", [(httpx.ConnectError, "unavailable"), (httpx.ReadTimeout, "timeout")])
-def test_fallback_when_ollama_down(settings, exc, reason):
-    a = make_alias(settings, [exc])
-    r = run(a.generate(SPOT, NOW))
-    assert r.source == "template" and r.reasons == [reason] and r.attempts == 1
-
-
-def test_recent_names_avoided(settings):
-    a = make_alias(settings, ["설렘이 머무는 자리", "설렘이 머무는 자리", "설렘이 머무는 자리", "설렘이 머무는 자리"])
-    assert run(a.generate(SPOT, NOW)).source == "llm"
-    r2 = run(a.generate(SPOT, NOW))
-    assert r2.source == "template" and "recent" in r2.reasons
-
-
-def test_template_avoids_recent(settings):
-    a = make_alias(settings, [], seed=3)
-    lx = a.lexicon_for(SPOT)
-    names = [a.template(lx) for _ in range(settings.alias.recent_size)]
-    assert len(set(names)) == len(names)          # 최근 N개 안에서는 반복 없음
-
-
-def test_prompt_has_no_place_info(settings):
-    captured = []
-    a = make_alias(settings, ["설렘이 머무는 자리"], captured)
-    run(a.generate(SPOT, NOW))
-    payload = json.dumps(captured[0], ensure_ascii=False)
-    for leak in ("대구앞산공원", "앞산", "대명동", "126132", "근린공원"):
-        assert leak not in payload
-    assert "시간대: 오후" in captured[0]["prompt"] and "힐링" in captured[0]["prompt"]
-    assert captured[0]["format"]["required"] == ["blind_name"]      # JSON 출력 강제
+def test_no_runtime_llm_code():
+    """실행 중 LLM 호출 코드가 서버에 남아 있지 않다."""
+    src = "\n".join(p.read_text(encoding="utf-8") for p in (ROOT / "app").glob("*.py"))
+    for word in ("ollama", "11434", "/api/generate", "AliasGenerator", "alias_mode"):
+        assert word not in src.lower() if word.islower() else word not in src, word

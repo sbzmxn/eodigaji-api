@@ -1,6 +1,6 @@
 # 어디가지? 추천 서버 API — 앱 팀용
 
-> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-11. 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
+> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-12. 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
 > 시연 서버 주소는 ngrok 주소로 바뀐다. 아래 `BASE` 를 바꿔 쓰면 된다.
 
 ## 0. 한눈에 보기
@@ -9,10 +9,11 @@
 |---|---|---|
 | 1 | `GET /api/v1/keywords` | 운전 시간 슬라이더가 바뀔 때(디바운스 300ms 권장). 키워드 칩의 활성/비활성과 안내 문구 |
 | 2 | `POST /api/v1/recommend` | [뽑기] / [다시 뽑기] |
-| 3 | (앱) NaviHelper `requestRoute` | 응답의 `destination` 좌표 + 가명/'미지의 땅' |
+| 3 | (앱) NaviHelper `requestRoute` | 응답의 `destination` 좌표 + 앱이 `BlindNames.pick()` 으로 고른 가명 |
 | 4 | (앱) 도착·주차 후 | `reveal` 표시, 도감 저장 |
 
 - 시간 입력은 **목적지까지 편도 운전 시간** `drive_minutes` (15~120분). 예전 `available_minutes` 는 폐기됐다(보내면 400).
+- **가명은 앱 `BlindNames`([`BlindNames.kt`](BlindNames.kt))에서 고른다. 서버 응답의 `blind_name` 은 쓰지 않아도 된다.** (호환을 위해 당분간 같은 100개 목록에서 고른 값을 내려준다.)
 - 서버는 좌표를 저장·로그하지 않는다. 사용자 식별자는 보내지 않는다.
 - 타임아웃 권장: `/keywords` 5초, `/recommend` 15초.
 
@@ -97,8 +98,8 @@ curl "$BASE/healthz"
 
 ```json
 {
-  "request_id": "37271075b20840e1b5e21365fef5fbe7",
-  "blind_name": "설레는 쉼터",
+  "request_id": "f031e8c12cc94bacaec3ea0852ea66ac",
+  "blind_name": "숨겨진 평온",
   "destination": {"lat": 37.556468, "lng": 127.020801},
   "hint": {"parking": "불가", "fee": "무료", "open_now": true},
   "reveal": {
@@ -110,20 +111,20 @@ curl "$BASE/healthz"
     "theme": "산책",
     "matched_keywords": ["walk"]
   },
-  "alias_source": "template"
+  "alias_source": "pool"
 }
 ```
 
 | 필드 | 언제 보여 주나 | 값 |
 |---|---|---|
-| `blind_name` | 출발 전·주행 중 | 감성 가명. NaviHelper `poiName` 에 넣어도 된다 |
+| `blind_name` | **쓰지 않아도 됨** | 호환용. 앱은 `BlindNames.pick()` 으로 직접 고른다(같은 100개 목록) |
 | `destination` | NaviHelper 로만 전달 | WGS84 십진 도 |
 | `hint.parking` | 출발 전 힌트 카드 | `"가능"` / `"불가"` / `null` |
 | `hint.fee` | 출발 전 힌트 카드 | 기본 입장료 기준 `"무료"` / `"유료"` / `null` |
 | `hint.open_now` | 출발 전 힌트 카드 | **도착 예상 시각** 기준 운영 여부 `true` / `false` / `null`. `false` 는 다른 후보가 모두 닫혀 있을 때만 나온다 |
 | `reveal.*` | **도착·주차 후에만** | 실제 이름, 주소, 소개(최대 약 120자), 사진, 테마(예: `숲·산책`), 매칭된 키워드 |
 | `reveal.image_url` | 언박싱 | `null` 일 수 있음(이용 조건 불명 이미지는 서버가 뺌). 항상 https |
-| `alias_source` | 표시하지 않음 | `"template"`(시연 기본) / `"llm"`. 품질 모니터링용 |
+| `alias_source` | 표시하지 않음 | 항상 `"pool"` (검수된 가명 목록) |
 
 `null` 인 힌트 항목은 숨긴다.
 
@@ -164,11 +165,11 @@ data class RecommendRequest(
 
 data class RecommendResponse(
     @SerializedName("request_id") val requestId: String,
-    @SerializedName("blind_name") val blindName: String,
+    @SerializedName("blind_name") val blindName: String,      // 호환용 — 앱은 BlindNames.pick() 사용
     @SerializedName("destination") val destination: Destination,
     @SerializedName("hint") val hint: Hint,
     @SerializedName("reveal") val reveal: Reveal,
-    @SerializedName("alias_source") val aliasSource: String,
+    @SerializedName("alias_source") val aliasSource: String,  // 항상 "pool"
 )
 
 data class Destination(
@@ -275,22 +276,32 @@ object Keyword {
 
 ## 6. 주의사항
 
-1. **NaviHelper `RouteInfo` 는 Java 생성자에서 경도를 먼저 받는다.**
-   Pleos 문서의 Java 예시: `new RouteInfo(127.03636666, 37.48544722, null, null, "42dot", ...)` — 첫 인자가 경도(longitude), 둘째가 위도(latitude).
-   Kotlin 은 이름 붙은 인자로 넘겨 순서 실수를 막는 것을 권장한다.
+1. **NaviHelper `RouteInfo` 는 위도(`latitude`)가 먼저다. 반드시 이름 붙은 인자로 넘긴다.**
    ```kotlin
-   RouteInfo(
+   val blindName = BlindNames.pick(RecentBlindNames.load(prefs))   // RecentBlindNames: TEAM_HANDOFF.md 참고
+   val routeInfo = RouteInfo(
        latitude = res.destination.lat,
        longitude = res.destination.lng,
-       displayLatitude = null, displayLongitude = null,
-       poiName = "미지의 땅",          // 또는 res.blindName
-       poiId = ..., poiSubId = ...,     // 필수 여부는 문서에서 확인하지 못함 — 에뮬레이터로 확인 필요
-       address = "",                    // 실주소를 넣으면 블라인드가 깨진다
+       displayLatitude = null,
+       displayLongitude = null,
+       poiName = blindName,         // 실제 장소명 금지
+       poiId = "",                  // 필수 여부는 문서에서 확인하지 못함 — 에뮬레이터로 확인한 값으로 교체
+       address = "",                // 실주소를 넣으면 블라인드가 깨진다
+       poiSubId = "",               // 위와 같음
    )
    ```
+   위치 인자(순서)로 넘기지 않는다. Pleos 문서의 Java 예시는 첫 인자에 경도 값(127.x)을 넣고 있어 문서끼리 순서가 다르게 보이므로, 이름 붙은 인자로 넘기면 순서와 무관하게 안전하다.
    좌표계: 서버 좌표는 WGS84 십진 도로 보인다(경복궁 좌표 대조). NaviHelper 문서에는 좌표계가 명시돼 있지 않으니 에뮬레이터에서 한 번 경로를 띄워 확인할 것.
 2. **이미지(`reveal.image_url`)는 출처 "한국관광공사"를 표시하고, 자르거나 덮지 않는다.** 일부 이미지는 공공누리 제3유형(변경 금지)이다. 썸네일이 필요하면 비율을 유지한 채 축소(`fitCenter`)만 한다. `centerCrop`, 텍스트·그라데이션 오버레이는 쓰지 않는다.
 3. **`reveal` 은 도착·주차 전에는 화면에 표시하지 않는다.** 메모리에만 들고 있다가 도착 + 주차 조건이 모두 충족되면 보여 준다. NaviHelper 에도 넘기지 않는다(`address` 는 빈 값). 로그·크래시 리포트에도 찍지 않는다.
 4. [다시 뽑기] 는 직전까지 나온 `reveal.content_id` 를 `exclude_content_ids` 에 누적해서 보낸다(세션 단위).
 5. 섬 출발: 제주·울릉도·옹진 섬처럼 다리로 이어지지 않은 곳에서 출발하면 같은 섬 안의 장소만 나오고, 육지에서 출발하면 그런 섬은 나오지 않는다(서버 처리).
 6. 서버 기동 직후 몇 초간은 관광지 목록을 받는 중일 수 있다. `/healthz` 의 `index_spots` 가 0 이면 잠시 후 재시도.
+
+## 7. 가명 (`BlindNames.kt`)
+
+- 파일: [`docs/BlindNames.kt`](BlindNames.kt) — `object BlindNames { val LIST: List<String>; fun pick(recent: Collection<String> = emptyList(), random: Random = Random.Default): String }`.
+  패키지명만 앱에 맞게 바꿔 복사한다.
+- `pick(recent)` 은 `recent` 에 없는 이름 중 하나를 무작위로 고른다(모두 최근이면 전체에서). 최근 10개 저장은 `TEAM_HANDOFF.md` 의 `RecentBlindNames`.
+- 목록 100개는 팀이 검수했고 서버 `config/alias_pool.yaml` 과 같다. 서버 테스트가 두 목록의 일치와 금지어(장소 유형어·지명·읍면동, 5~20자) 검증을 매번 검사한다. 목록을 바꿀 때는 두 파일을 함께 바꾼다.
+- 가명은 출발 전·주행 중 화면과 NaviHelper `poiName` 에 쓰고, 도감에는 그날 고른 가명을 저장한다.

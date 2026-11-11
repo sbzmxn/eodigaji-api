@@ -10,7 +10,7 @@ from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 from . import sun
-from .alias import AliasGenerator
+from .alias import AliasPool
 from .config import Settings
 from .keywords import (combined_keyword_score, is_excluded, keyword_score, landmass_of, match_keywords,
                        theme_of, time_status)
@@ -51,7 +51,7 @@ class Outcome:
 
 
 class Recommender:
-    def __init__(self, settings: Settings, index: IndexManager, details: DetailService, alias: AliasGenerator,
+    def __init__(self, settings: Settings, index: IndexManager, details: DetailService, alias: AliasPool,
                  now_fn: Optional[Callable[[], datetime]] = None, rng: Optional[random.Random] = None):
         self.s = settings
         self.index = index
@@ -180,11 +180,11 @@ class Recommender:
             fee = await self.details.fee(spot)
         except TourApiError:
             fee = None
-        alias = await self.alias.generate(spot, arrival)
+        blind_name = self.alias.pick(spot)
         matched = list(chosen.matches)
         det = chosen.detail or Detail()
         body = {
-            "blind_name": alias.name,
+            "blind_name": blind_name,
             "destination": {"lat": spot.lat, "lng": spot.lng},
             "hint": {"parking": normalize_parking(det.parking), "fee": fee, "open_now": chosen.open_now},
             "reveal": {
@@ -196,9 +196,9 @@ class Recommender:
                 "theme": theme_of(spot, matched, kcfg, self.index.ref.lcls_names),
                 "matched_keywords": matched,
             },
-            "alias_source": alias.source,
+            "alias_source": "pool",
         }
-        return Outcome(body, len(pool), alias.source)
+        return Outcome(body, len(pool), "pool")
 
     async def _finalists(self, top: list[Cand], arrival: datetime, active: list[str]) -> list[Cand]:
         """상위 후보부터 상세조회해 finalists 개를 채운다.

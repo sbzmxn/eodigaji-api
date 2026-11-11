@@ -16,7 +16,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from .alias import AliasGenerator, build_region_words, build_type_words
+from .alias import AliasPool, build_region_words, build_type_words, build_unit_words
 from .audit import AuditSink, LogSink, RequestMeta
 from .cache import DiskCache
 from .config import Settings, get_settings
@@ -62,7 +62,7 @@ def create_app(
     *,
     index: Optional[IndexManager] = None,
     details: Optional[DetailService] = None,
-    alias: Optional[AliasGenerator] = None,
+    alias: Optional[AliasPool] = None,
     now_fn: Optional[Callable[[], datetime]] = None,
     rng: Optional[random.Random] = None,
     sink: Optional[AuditSink] = None,
@@ -75,39 +75,46 @@ def create_app(
     index = index or IndexManager(s, tour, cache)
     details = details or DetailService(s, tour, cache)
     rng = rng or random.Random(s.random_seed)
-    alias = alias or AliasGenerator(s.alias, build_type_words(s.alias, s.keywords, {}), rng=rng, mode=s.alias_mode)
+    alias = alias or AliasPool(s.alias, build_type_words(s.alias, s.keywords, {}), rng=rng)
+    alias.check()   # 기본 금지어로 가명 목록 검사. 걸리면 AliasPoolError (앱을 만들지 않음)
     rec = Recommender(s, index, details, alias, now_fn=now_fn, rng=rng)
     sink = sink or LogSink()
 
     async def warm_up() -> None:
-        ref = await index.load_ref()
-        alias.set_base_words(build_type_words(s.alias, s.keywords, ref.lcls_names)
-                             | build_region_words(ref.region_names))
-        await index.ensure_index()
+        """참조 데이터·인덱스를 받고, 넓힌 금지어(신분류·시군구·읍면동)로 가명 목록을 다시 검사한다.
+        데이터를 못 받으면 경고만 남기고 계속하지만, 가명 목록 검증 실패(AliasPoolError)는 시작을 중단시킨다."""
+        ref = idx = None
+        try:
+            ref = await index.load_ref()
+        except Exception as e:  # noqa: BLE001
+            log.warning("reference data load failed: %s", type(e).__name__)
+        try:
+            idx = await index.ensure_index()
+        except Exception as e:  # noqa: BLE001  요청 시 재시도
+            log.warning("index load failed: %s", type(e).__name__)
+        alias.update_lexicon(
+            build_type_words(s.alias, s.keywords, ref.lcls_names if ref else {})
+            | build_region_words(ref.region_names if ref else []),
+            build_unit_words(idx.spots) if idx else set(),
+        )
 
     async def refresher() -> None:
         while True:
-            # Ollama keep_alive(30m)보다 짧은 주기로 모델을 붙잡아 두고, 인덱스는 TTL(하루) 지났을 때만 수집
-            await alias.warm()
+            await asyncio.sleep(3600)
             with contextlib.suppress(Exception):
-                await index.ensure_index()
-            await asyncio.sleep(20 * 60)
+                await index.ensure_index()   # TTL(하루) 지났을 때만 실제로 수집
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI):
         task = None
         if load_on_startup:
-            try:
-                await warm_up()
-            except Exception as e:  # noqa: BLE001  기동은 계속 (요청 시 재시도)
-                log.warning("warm-up failed: %s", type(e).__name__)
+            await warm_up()
             task = asyncio.create_task(refresher())
         yield
         if task:
             task.cancel()
         if tour:
             await tour.aclose()
-        await alias.aclose()
 
     app = FastAPI(title="어디가지? 추천 서버", version="0.1.0", lifespan=lifespan)
     app.state.recommender = rec

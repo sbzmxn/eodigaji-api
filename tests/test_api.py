@@ -1,13 +1,13 @@
 import logging
 import random
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.alias import AliasPoolError
 from app.main import create_app
 from app.spots import Detail
-from conftest import LOC_IDS, LOCATIONS, NOW, FakeDetails, FakeIndex, make_alias, make_spot
+from conftest import LOC_IDS, LOCATIONS, NOW, FakeDetails, FakeIndex, make_pool, make_spot
 
 
 @pytest.fixture(params=LOCATIONS, ids=LOC_IDS)
@@ -35,11 +35,10 @@ def body(o, **over):
             **over}
 
 
-def client(settings, o, details=None, answers=None, spots=None, now=NOW, seed=1, alias=None):
+def client(settings, o, details=None, spots=None, now=NOW, seed=1, load_on_startup=False):
     app = create_app(settings, index=FakeIndex(spots if spots is not None else spots_around(o)),
-                     details=details or FakeDetails(),
-                     alias=alias or make_alias(settings, answers or ["설렘이 머무는 자리"] * 50),
-                     now_fn=lambda: now, rng=random.Random(seed), load_on_startup=False)
+                     details=details or FakeDetails(), alias=make_pool(settings, seed),
+                     now_fn=lambda: now, rng=random.Random(seed), load_on_startup=load_on_startup)
     return TestClient(app)
 
 
@@ -52,7 +51,7 @@ def test_recommend_contract(settings, origin):
     assert set(j["hint"]) == {"parking", "fee", "open_now"}                       # theme 없음
     assert set(j["reveal"]) == {"content_id", "real_name", "address", "overview_short", "image_url",
                                 "theme", "matched_keywords"}
-    assert j["alias_source"] == "llm" and j["blind_name"] == "설렘이 머무는 자리"
+    assert j["alias_source"] == "pool" and j["blind_name"] in settings.alias.pool
     assert j["hint"] == {"parking": "가능", "fee": "무료", "open_now": True}
     spot = {s.content_id: s for s in spots_around(origin)}[j["reveal"]["content_id"]]
     assert j["destination"] == {"lat": spot.lat, "lng": spot.lng}
@@ -128,7 +127,8 @@ def test_errors(settings, over, code):
     j = r.json()
     assert r.status_code == 400 and j["error"]["code"] == code
     assert j["error"]["request_id"]
-    assert "abc" not in r.text and str(o[0]) not in r.text      # 입력값을 되돌려 주지 않는다
+    echoed = {k: v for k, v in j["error"].items() if k != "request_id"}   # request_id 는 무작위 16진수
+    assert "abc" not in str(echoed) and str(o[0]) not in str(echoed)    # 입력값을 되돌려 주지 않는다
 
 
 @pytest.mark.parametrize("payload", [
@@ -156,18 +156,28 @@ def test_unknown_fields_ignored_with_warning(settings, caplog):
     assert warn and "companion" in warn[0] and "family" not in warn[0]   # 이름만, 값은 남기지 않음
 
 
-def test_llm_failure_is_not_error(settings, origin):
-    with client(settings, origin, answers=[httpx.ConnectError]) as c:
-        r = c.post("/api/v1/recommend", json=body(origin))
-    assert r.status_code == 200 and r.json()["alias_source"] == "template"
+def test_blind_names_vary_and_come_from_pool(settings, origin):
+    with client(settings, origin) as c:
+        names = [c.post("/api/v1/recommend", json=body(origin)).json()["blind_name"] for _ in range(12)]
+    assert set(names) <= set(settings.alias.pool)
+    assert len(set(names[:10])) == 10                    # 최근 10개는 겹치지 않는다
 
 
-def test_template_mode_never_calls_llm(settings, origin):
-    called = []
-    alias = make_alias(settings, [], captured=called, mode="template")
-    with client(settings, origin, alias=alias) as c:
-        j = c.post("/api/v1/recommend", json=body(origin)).json()
-    assert j["alias_source"] == "template" and called == []
+def test_bad_pool_blocks_app_creation(settings):
+    settings.alias.pool = ["바다가 보이는 쉼터"] + settings.alias.pool[1:]
+    with pytest.raises(AliasPoolError):
+        client(settings, (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"]))
+
+
+def test_startup_rechecks_pool_with_admin_unit_names(settings):
+    """서버 시작 시 인덱스의 읍·면·동 이름으로 다시 검사하고, 걸리면 시작하지 않는다."""
+    o = (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"])
+    spots = spots_around(o) + [make_spot("u", "어느곳", base=o, addr1="가나도 다라시 지금리 1")]   # '지금 여기'
+    with pytest.raises(AliasPoolError):
+        with client(settings, o, spots=spots, load_on_startup=True):
+            pass
+    with client(settings, o, load_on_startup=True) as c:       # 걸리는 동 이름이 없으면 정상 시작
+        assert c.get("/healthz").status_code == 200
 
 
 def test_keywords_endpoint(settings, origin):

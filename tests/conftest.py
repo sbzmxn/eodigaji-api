@@ -5,10 +5,9 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import httpx
 import pytest
 
-from app.alias import AliasGenerator, build_region_words, build_type_words
+from app.alias import AliasPool, build_region_words, build_type_words
 from app.config import load_settings
 from app.spots import Detail, RefData, Spot, SpotIndex
 
@@ -75,27 +74,9 @@ class FakeDetails:
         return self.fee_val
 
 
-def ollama_transport(answers, captured=None):
-    """answers: 문자열(blind_name), dict(원시 응답 JSON), 'RAW:<text>', 또는 예외 클래스."""
-    it = iter(answers)
-
-    def handler(request: httpx.Request):
-        if captured is not None:
-            captured.append(json.loads(request.content))
-        a = next(it)
-        if isinstance(a, type) and issubclass(a, Exception):
-            raise a("mock", request=request)
-        if isinstance(a, str) and a.startswith("RAW:"):
-            return httpx.Response(200, json={"response": a[4:]})
-        return httpx.Response(200, json={"response": json.dumps({"blind_name": a}, ensure_ascii=False)})
-
-    return httpx.MockTransport(handler)
-
-
 def base_words(settings):
     return build_type_words(settings.alias, settings.keywords, LCLS_NAMES) | build_region_words(REGIONS)
 
 
-def make_alias(settings, answers, captured=None, seed=0, mode="llm"):
-    client = httpx.AsyncClient(transport=ollama_transport(answers, captured))
-    return AliasGenerator(settings.alias, base_words(settings), client=client, rng=random.Random(seed), mode=mode)
+def make_pool(settings, seed=0):
+    return AliasPool(settings.alias, base_words(settings), rng=random.Random(seed))

@@ -12,7 +12,7 @@ from app.cache import DiskCache
 from app.main import AccessLogSanitizer, create_app
 from app.spots import DetailService, IndexManager
 from app.tour_client import TourApiError, TourClient, mask_url
-from conftest import LOC_IDS, LOCATIONS, NOW, make_alias, make_spot
+from conftest import LOC_IDS, LOCATIONS, NOW, make_pool, make_spot
 
 KEY = "SECRET-KEY-123"
 
@@ -78,7 +78,7 @@ def test_coordinates_never_cached_or_logged_or_sent(settings, tmp_path, caplog, 
     tour = FakeTour(spots)
     cache = DiskCache(settings.cache_dir)
     app = create_app(settings, index=IndexManager(settings, tour, cache), details=DetailService(settings, tour, cache),
-                     alias=make_alias(settings, ["설렘이 머무는 자리"] * 5), now_fn=lambda: NOW,
+                     alias=make_pool(settings), now_fn=lambda: NOW,
                      rng=random.Random(0), load_on_startup=False)
     caplog.set_level(logging.DEBUG)
     with TestClient(app) as c:

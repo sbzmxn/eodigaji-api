@@ -39,11 +39,11 @@ class Reveal(BaseModel):
 
 class RecommendResponse(BaseModel):
     request_id: str
-    blind_name: str
+    blind_name: str = Field(description="호환용. 앱은 BlindNames(docs/BlindNames.kt)에서 직접 고른다. 같은 100개 목록에서 고른 값")
     destination: Destination
     hint: Hint
     reveal: Reveal
-    alias_source: str
+    alias_source: str = Field(description='항상 "pool" (검수된 가명 목록)')
 
 
 class KeywordStatus(BaseModel):

@@ -2,7 +2,6 @@
 timezone: Asia/Seoul
 random_seed: null          # 정수로 두면 장소 선택·가명 템플릿이 재현 가능 (테스트/시연용)
 log_level: INFO
-alias_mode: template       # template(시연 기본, LLM 미호출) | llm(Ollama 생성 + 템플릿 폴백)
 
 # 다리로 육지와 이어지지 않은 땅. 출발지와 같은 땅에 있는 후보만 추천한다.
 # 출발지의 땅 = 반경 안에서 가장 가까운 관광지(origin_landmass_max_km 이내)의 땅. 위에서부터 첫 번째로 맞는 그룹.
@@ -76,15 +75,10 @@ season_rules:
     text: [단풍]
     bonus: 0.3
 
-alias:
-  ollama_url: http://localhost:11434
-  model: llama3.2:1b
-  timeout_s: 8             # 재시도 포함 전체 예산
-  max_retries: 2
-  temperature: 1.0
-  min_len: 5               # 공백 포함 글자 수
+alias:                     # 가명은 config/alias_pool.yaml 목록에서 고른다 (실행 중 LLM 없음)
+  min_len: 5               # 공백 포함 글자 수 (목록 검증용)
   max_len: 20
-  recent_size: 20
+  recent_size: 10          # 최근 N개와 같은 이름을 피한다 (서버 메모리에만)
 
 bounds:                    # 대한민국 대략 범위 밖이면 INVALID_LOCATION
   lat_min: 33.0
