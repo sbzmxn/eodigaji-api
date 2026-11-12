@@ -21,7 +21,8 @@ from .audit import AuditSink, LogSink, RequestMeta
 from .cache import DiskCache
 from .config import Settings, get_settings
 from .recommend import ApiError, Conditions, Recommender, Retry, new_request_id
-from .schemas import ERROR_CODES, ErrorResponse, KeywordsResponse, RecommendRequest, RecommendResponse
+from .schemas import (ERROR_CODES, ErrorResponse, EtaCheckRequest, EtaCheckResponse, KeywordsResponse,
+                      RecommendRequest, RecommendResponse, SearchFields)
 from .spots import DetailService, IndexManager
 from .tour_client import TourClient
 
@@ -172,14 +173,17 @@ def create_app(
         res.pop("_estimated", None)
         return {"request_id": request.state.meta.request_id, **res}
 
-    @app.post("/api/v1/recommend", response_model=RecommendResponse, responses=errors)
-    async def recommend(request: Request, body: RecommendRequest):
+    def check_extras(request: Request, body: SearchFields) -> None:
         extras = sorted(body.model_extra or {})
         if "available_minutes" in extras:
             raise ApiError("INVALID_REQUEST", RENAMED_MSG)
         if extras:  # 정의 안 된 필드는 무시. 필드 '이름'만 남기고 값은 남기지 않는다
             log.warning("ignored fields rid=%s: %s", request.state.meta.request_id,
                         ",".join(e[:30] for e in extras[:5]))
+
+    @app.post("/api/v1/recommend", response_model=RecommendResponse, responses=errors)
+    async def recommend(request: Request, body: RecommendRequest):
+        check_extras(request, body)
         rc = body.retry_context
         retry = Retry(rc.previous_content_ids, rc.observed_eta_seconds) if rc else None
         out = await rec.recommend(body.latitude, body.longitude, body.drive_minutes,
@@ -189,6 +193,25 @@ def create_app(
         meta.n_candidates = out.n_candidates
         meta.alias_source = out.alias_source
         return {"request_id": meta.request_id, **out.body}
+
+    @app.post("/api/v1/eta-check", response_model=EtaCheckResponse, responses=errors)
+    async def eta_check(request: Request, body: EtaCheckRequest):
+        check_extras(request, body)
+        meta: RequestMeta = request.state.meta
+        res = await rec.eta_check(body.latitude, body.longitude, body.drive_minutes, body.keyword_ids,
+                                  body.exclude_content_ids, Conditions(body.require_parking, body.exclude_paid),
+                                  body.content_id, body.observed_eta_seconds, body.previous_content_ids)
+        out = res.pop("recommendation")
+        if out is not None:
+            meta.n_candidates = out.n_candidates
+            meta.alias_source = out.alias_source
+        # ETA·content_id·판단만 남긴다 (좌표는 남기지 않음)
+        log.info("eta-check rid=%s content_id=%s eta_s=%d limit_s=%d attempt=%d decision=%s reason=%s next=%s",
+                 meta.request_id, body.content_id[:20], body.observed_eta_seconds, body.drive_minutes * 60,
+                 res["attempt"], res["decision"], res["reason"],
+                 out.body["reveal"]["content_id"] if out else "-")
+        return {"request_id": meta.request_id, **res,
+                "recommendation": {"request_id": meta.request_id, **out.body} if out else None}
 
     @app.get("/healthz")
     async def healthz():

@@ -1,6 +1,6 @@
 # 어디가지? 추천 서버 API — 앱 팀용
 
-> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds`, 키워드 `sunrise`, 추천 조건 `require_parking`·`exclude_paid` 추가). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
+> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds`, 키워드 `sunrise`, 추천 조건 `require_parking`·`exclude_paid`, `POST /api/v1/eta-check` 추가). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
 > 시연 때 서버는 노트북 안에서 돌고 에뮬레이터는 `http://10.0.2.2:8000/` 으로 붙는다. 다른 환경(ngrok 등)이면 아래 `BASE` 를 바꿔 쓰면 된다.
 
 ## 0. 한눈에 보기
@@ -9,14 +9,14 @@
 |---|---|---|
 | 1 | `GET /api/v1/keywords` | 운전 시간 슬라이더나 조건 스위치(주차 가능한 곳만·유료 체험 제외)가 바뀔 때(디바운스 300ms 권장). 키워드 칩의 활성/비활성과 안내 문구 |
 | 2 | `POST /api/v1/recommend` | [뽑기] / [다시 뽑기] |
-| 3 | (앱) NaviHelper `requestTrip` | 실제 ETA(초) 확인. `drive_minutes × 60` 을 넘으면 `retry_context` 를 담아 2번을 다시 호출(최대 3회, [2-3](#2-3-자동-재추천-retry_context)) |
+| 3 | (앱) NaviHelper `requestTrip` → `POST /api/v1/eta-check` | 실제 ETA(초)를 서버에 보낸다. 서버가 `decision` 으로 답한다: `accept`·`fallback` 이면 `route_content_id` 로 안내, `retry` 면 같이 온 새 추천으로 3번을 반복([2-3](#2-3-eta-판단-post-apiv1eta-check)). 앱은 시간 비교·횟수 세기를 하지 않는다 |
 | 4 | (앱) NaviHelper `requestRoute` | 응답의 `destination` 좌표 + 앱이 `BlindNames.pick()` 으로 고른 가명 |
 | 5 | (앱) 도착·주차 후 | `reveal` 표시, 도감 저장 |
 
 - 시간 입력은 **목적지까지 편도 운전 시간** `drive_minutes` (15~120분). 예전 `available_minutes` 는 폐기됐다(보내면 400).
 - **가명은 앱 `BlindNames`([`BlindNames.kt`](BlindNames.kt))에서 고른다. 서버 응답의 `blind_name` 은 쓰지 않아도 된다.** (호환을 위해 당분간 같은 100개 목록에서 고른 값을 내려준다.)
 - 서버는 좌표를 저장·로그하지 않는다. 사용자 식별자는 보내지 않는다.
-- 타임아웃 권장: `/keywords` 5초, `/recommend` 10초(호출 1회). 재추천을 포함한 로딩 화면 전체는 **12초** ([2-4](#2-4-로딩-시간과-타임아웃)).
+- 타임아웃 권장: `/keywords` 5초, `/recommend` 10초(호출 1회). 재추천을 포함한 로딩 화면 전체는 **12초** ([2-4](#2-5-로딩-시간과-타임아웃)).
 
 ## 1. 엔드포인트와 curl
 
@@ -29,6 +29,10 @@ curl "$BASE/api/v1/keywords?lat=37.4979&lng=127.0276&drive_minutes=30"
 # 추천
 curl -X POST "$BASE/api/v1/recommend" -H 'Content-Type: application/json' \
   -d '{"latitude":37.4979,"longitude":127.0276,"drive_minutes":30,"keyword_ids":["forest","walk"],"exclude_content_ids":[]}'
+
+# ETA 판단 (requestTrip 으로 잰 ETA 를 보냄)
+curl -X POST "$BASE/api/v1/eta-check" -H 'Content-Type: application/json' \
+  -d '{"latitude":37.4979,"longitude":127.0276,"drive_minutes":30,"keyword_ids":["forest","walk"],"content_id":"3352052","observed_eta_seconds":2160,"previous_content_ids":["3352052"]}'
 
 # 서버 상태 (관광지 인덱스 적재 여부)
 curl "$BASE/healthz"
@@ -99,7 +103,7 @@ curl "$BASE/healthz"
 | `drive_minutes` | Int | ✔ | 15~120 |
 | `keyword_ids` | List<String> | | 0~3개, 중복 없이. 0개 = "키워드 없이 뽑기". `/keywords` 에서 `enabled=true` 인 것만 보내기 |
 | `exclude_content_ids` | List<String> | | [다시 뽑기] 때 이 세션에서 이미 나온 `reveal.content_id` 들 (최대 200) |
-| `retry_context` | Object | | 자동 재추천 때만. 아래 [2-3](#2-3-자동-재추천-retry_context) |
+| `retry_context` | Object | | 자동 재추천 때만. 아래 [2-4](#2-4-자동-재추천-retry_context-호환용) |
 | `require_parking` | Boolean | | 기본 `false`. `true` 면 주차가 `"가능"` 으로 확인된 곳만 추천(불가·정보 없음 제외) |
 | `exclude_paid` | Boolean | | 기본 `false`. `true` 면 기본 입장료·이용료가 `"유료"` 인 곳 제외(무료·정보 없음은 포함) |
 
@@ -158,7 +162,98 @@ curl "$BASE/healthz"
 
 `open_now` 가 `null` 이면 숨긴다.
 
-### 2-3. 자동 재추천 (`retry_context`)
+### 2-3. ETA 판단 (`POST /api/v1/eta-check`)
+
+앱이 `requestTrip` 으로 잰 실제 ETA 를 보내면 서버가 **시간 안인지 판단하고, 필요하면 재추천까지 해서** 돌려준다. ETA 는 앱만 잴 수 있으므로(Pleos `requestTrip`) 서버는 내비를 부르지 않는다. 서버는 상태를 저장하지 않으므로 **앱이 매번 전부 보낸다.**
+
+요청 — `/recommend` 와 같은 검색 필드(같은 검증) + 세 필드
+
+```json
+{
+  "latitude": 37.4979,
+  "longitude": 127.0276,
+  "drive_minutes": 30,
+  "keyword_ids": ["forest", "walk"],
+  "exclude_content_ids": [],
+  "require_parking": false,
+  "exclude_paid": false,
+  "content_id": "3352052",
+  "observed_eta_seconds": 2160,
+  "previous_content_ids": ["3352052"]
+}
+```
+
+| 필드 | 타입 | 필수 | 설명 |
+|---|---|---|---|
+| `latitude` … `exclude_paid` | | | `/recommend` 와 같다. **첫 추천 때와 같은 값**을 보낸다(조건 스위치 포함) |
+| `content_id` | String | ✔ | 방금 ETA 를 잰 후보 (`reveal.content_id`) |
+| `observed_eta_seconds` | Int | ✔ | 그 후보까지 `requestTrip` ETA(초), 1~21600 |
+| `previous_content_ids` | List<String> | ✔ | 지금까지 나온 후보 전부(오래된 → 최근, 1~200개). **마지막 원소가 `content_id`** 여야 한다 |
+
+판단 규칙 (`settings.yaml` 의 `eta_check`: 허용 오차 0초, 최대 3회)
+
+| 조건 | `decision` | `reason` | `route_content_id` | `recommendation` |
+|---|---|---|---|---|
+| ETA ≤ `drive_minutes × 60` (+ 오차) | `accept` | `within_limit` | `content_id` | `null` |
+| 넘음, `previous_content_ids` 가 3개 미만 | `retry` | `over_limit` | `null` | 새 추천 (`/recommend` 응답과 같은 형식) |
+| 넘음, 이미 3번째 후보 | `fallback` | `max_attempts` | `content_id` | `null` |
+| 넘음, 재추천할 곳이 없음 | `fallback` | `no_candidates` | `content_id` | `null` |
+| 넘음, 조건 스위치에 맞는 곳이 없음 | `fallback` | `condition_not_met` | `content_id` | `null` |
+
+- 재추천은 `/recommend` 의 `retry_context` 경로를 서버 안에서 그대로 쓴다: 방금 후보의 실제 ETA 로 속도를 보정하고, `previous_content_ids`·`exclude_content_ids` 를 모두 빼고, 조건 스위치를 그대로 적용한다.
+- `attempt` = 안내할 후보(`accept`·`fallback`) 또는 새 추천(`retry`)이 몇 번째 추천인지. 로딩 화면의 "(2/3)" 표시에 그대로 쓴다.
+- `NO_CANDIDATES`·`CONDITION_NOT_MET` 은 에러가 아니라 `fallback` 으로 온다. 그 밖의 에러(400 입력 오류, 502 관광 API 장애 등)는 `/recommend` 와 같은 에러 형식이다. 이때 앱은 방금 후보로 안내한다.
+- 입력 오류(`INVALID_REQUEST`): `content_id` 가 `previous_content_ids` 의 마지막이 아님, `observed_eta_seconds` ≤ 0, 필드 누락. 위치·운전시간·키워드 검증은 `/recommend` 와 같다(`accept` 일 때도 검사).
+- 서버 로그에는 request_id, content_id, ETA, 판단만 남고 좌표는 남지 않는다.
+
+응답 200 — accept (실제 응답, 30분 = 1800초 안)
+
+```json
+{"request_id": "dfda9c75b8824038b8f651f7fba3fcbd", "decision": "accept", "attempt": 1, "max_attempts": 3,
+ "reason": "within_limit", "route_content_id": "3352052", "recommendation": null}
+```
+
+응답 200 — retry (위 요청: ETA 2160초 > 1800초 → 속도 보정 후 더 가까운 곳)
+
+```json
+{
+  "request_id": "089ed9ea165b44a18e9b9bf5a8881bfa",
+  "decision": "retry",
+  "attempt": 2,
+  "max_attempts": 3,
+  "reason": "over_limit",
+  "route_content_id": null,
+  "recommendation": {
+    "request_id": "089ed9ea165b44a18e9b9bf5a8881bfa",
+    "blind_name": "어린이의 웃음",
+    "destination": {"lat": 37.4692, "lng": 127.0171},
+    "hint": {"parking": "가능", "fee": "무료", "open_now": true},
+    "reveal": {
+      "content_id": "2757831",
+      "real_name": "우면산자연생태공원",
+      "address": "서울특별시 서초구 우면동 산 34-1",
+      "overview_short": "우면산은 높이 293m로 서초구 우면동과 서초동, 양재동 등지의 도심에서 쉽게 오를 수 있는 산이다. 산모양이 소가 졸고 있는 모양이라 하여 우면산이라 이름이 붙여졌다.",
+      "image_url": "https://tong.visitkorea.or.kr/cms/resource/96/3540696_image2_1.jpg",
+      "theme": "숲·산책",
+      "matched_keywords": ["forest", "walk"]
+    },
+    "alias_source": "pool",
+    "straight_km": 3.32,
+    "estimated_drive_seconds": 1098
+  }
+}
+```
+
+응답 200 — fallback (세 번째 후보도 넘음: `content_id: "1602451"`, `previous_content_ids: ["3352052", "2757831", "1602451"]`, ETA 1980초)
+
+```json
+{"request_id": "9f5e98dc4ed440c0a53db9029a28552f", "decision": "fallback", "attempt": 3, "max_attempts": 3,
+ "reason": "max_attempts", "route_content_id": "1602451", "recommendation": null}
+```
+
+`route_content_id` 는 앱이 들고 있는 추천 응답 중 그 `content_id` 의 것으로 안내하라는 뜻이다(`destination`·`reveal` 은 다시 보내지 않는다).
+
+### 2-4. 자동 재추천 (`retry_context`, 호환용)
 
 서버의 운전시간은 직선거리 × 우회계수 ÷ 구간 속도로 추정한 값이라 실제 도로·교통과 다를 수 있다. 앱이 `requestTrip` 으로 받은 **실제 ETA** 를 보내면, 서버는 그 요청에 한해 평균 속도를 보정해 반경과 거리 구간을 다시 계산한다.
 
@@ -199,31 +294,14 @@ curl "$BASE/healthz"
 }
 ```
 
-앱 흐름 (최대 3회)
-
-```kotlin
-val limitSec = driveMinutes * 60
-val previous = mutableListOf<String>()
-var observed: Int? = null
-var res: RecommendResponse? = null
-for (attempt in 1..3) {
-    val retry = if (previous.isEmpty()) null else RetryContext(previous.toList(), observed)
-    val r = api.recommend(baseRequest.copy(retryContext = retry)).body() ?: break   // 에러(404 등) → 직전 결과 사용
-    res = r
-    previous += r.reveal.contentId
-    val eta = requestTripEtaSeconds(r.destination)          // NaviHelper requestTrip, 초 단위
-    observed = eta
-    if (eta <= limitSec) break                              // 설정 시간 이내 → 확정
-}
-// 3회 모두 초과면 마지막(가장 가까워진) 결과로 안내한다. NO_CANDIDATES 면 직전 결과를 쓴다.
-```
+호환용 앱 흐름: 앱이 `requestTrip` ETA 와 `drive_minutes × 60` 을 직접 비교하고, 넘으면 `retry_context` 를 담아 `/recommend` 를 다시 부른다(최대 3회, 횟수도 앱이 센다). **새 코드는 [2-3 eta-check](#2-3-eta-판단-post-apiv1eta-check) 를 쓴다.** `eta-check` 의 재추천은 서버 안에서 이 경로를 그대로 호출하므로 결과는 같다.
 
 - 자동 재추천의 `previous_content_ids` 와 사용자의 [다시 뽑기] `exclude_content_ids` 는 따로 보내도 되고(둘 다 제외됨), 같은 목록을 써도 된다.
 - 재추천 중 `NO_CANDIDATES`(404)가 오면 더 가까운 곳이 없다는 뜻이다. 직전 결과로 안내하는 것을 권장한다.
 
-### 2-4. 로딩 시간과 타임아웃
+### 2-5. 로딩 시간과 타임아웃
 
-**앱 총 대기 시간 = 서버 시간(n회 합계) + `requestTrip` 시간 × n**. 추천 n회(1~3)면 `requestTrip` 도 n회다. 시연에서는 서버가 같은 노트북에서 돌기 때문에(에뮬레이터 → `10.0.2.2`) 네트워크 왕복은 0으로 본다.
+**앱 총 대기 시간 = 서버 시간(n회 합계) + `requestTrip` 시간 × n**. 추천 n회(1~3)면 `requestTrip` 도 n회다. `eta-check` 를 쓰면 서버 호출은 `/recommend` 1회 + `eta-check` n회인데, `accept`·`fallback` 은 수 ms, `retry` 는 `/recommend` 1회와 같은 시간이라 아래 표가 그대로 맞다. 시연에서는 서버가 같은 노트북에서 돌기 때문에(에뮬레이터 → `10.0.2.2`) 네트워크 왕복은 0으로 본다.
 
 서버 시간(2026-11-13 실측, 7곳 × 30·60분, 프로세스 내, 네트워크 제외):
 
@@ -322,6 +400,36 @@ data class Reveal(
     @SerializedName("matched_keywords") val matchedKeywords: List<String>,
 )
 
+// ---- /eta-check ----
+data class EtaCheckRequest(
+    @SerializedName("latitude") val latitude: Double,
+    @SerializedName("longitude") val longitude: Double,
+    @SerializedName("drive_minutes") val driveMinutes: Int,
+    @SerializedName("keyword_ids") val keywordIds: List<String> = emptyList(),
+    @SerializedName("exclude_content_ids") val excludeContentIds: List<String> = emptyList(),
+    @SerializedName("require_parking") val requireParking: Boolean = false,
+    @SerializedName("exclude_paid") val excludePaid: Boolean = false,
+    @SerializedName("content_id") val contentId: String,                    // 방금 ETA 를 잰 후보
+    @SerializedName("observed_eta_seconds") val observedEtaSeconds: Int,    // requestTrip ETA(초)
+    @SerializedName("previous_content_ids") val previousContentIds: List<String>,  // 마지막 = contentId
+)
+
+data class EtaCheckResponse(
+    @SerializedName("request_id") val requestId: String,
+    @SerializedName("decision") val decision: String,          // "accept" | "retry" | "fallback"
+    @SerializedName("attempt") val attempt: Int,               // 1~3
+    @SerializedName("max_attempts") val maxAttempts: Int,
+    @SerializedName("reason") val reason: String,              // within_limit | over_limit | max_attempts | no_candidates | condition_not_met
+    @SerializedName("route_content_id") val routeContentId: String?,   // accept·fallback
+    @SerializedName("recommendation") val recommendation: RecommendResponse?,  // retry
+)
+
+// RecommendRequest 에서 같은 검색 조건으로 만들기
+fun RecommendRequest.toEtaCheck(contentId: String, etaSec: Int, previous: List<String>) = EtaCheckRequest(
+    latitude, longitude, driveMinutes, keywordIds, excludeContentIds, requireParking, excludePaid,
+    contentId, etaSec, previous,
+)
+
 // ---- 에러 ----
 data class ErrorResponse(@SerializedName("error") val error: ErrorBody)
 
@@ -343,6 +451,9 @@ interface EodigajiApi {
 
     @POST("api/v1/recommend")
     suspend fun recommend(@Body body: RecommendRequest): Response<RecommendResponse>
+
+    @POST("api/v1/eta-check")
+    suspend fun etaCheck(@Body body: EtaCheckRequest): Response<EtaCheckResponse>
 }
 
 // 에러 본문 파싱
@@ -372,12 +483,12 @@ val api = retrofit2.Retrofit.Builder()
 
 | code | HTTP | 언제 | 서버 message (실제) | 앱 문구 제안 / 처리 |
 |---|---|---|---|---|
-| `INVALID_REQUEST` | 400 | 형식 오류, `drive_minutes` 범위 밖, `available_minutes` 사용, `retry_context` 값 오류(`observed_eta_seconds` ≤ 0 등) | `drive_minutes 는 15~120 사이여야 합니다` / `available_minutes는 drive_minutes(편도 운전 시간, 분)로 변경됐어요` | "요청을 처리하지 못했어요. 앱을 최신 버전으로 업데이트해 주세요." (앱 버그이므로 로그 수집) |
+| `INVALID_REQUEST` | 400 | 형식 오류, `drive_minutes` 범위 밖, `available_minutes` 사용, `retry_context` 값 오류(`observed_eta_seconds` ≤ 0 등), `eta-check` 의 `content_id` 가 `previous_content_ids` 마지막이 아님 | `drive_minutes 는 15~120 사이여야 합니다` / `available_minutes는 drive_minutes(편도 운전 시간, 분)로 변경됐어요` | "요청을 처리하지 못했어요. 앱을 최신 버전으로 업데이트해 주세요." (앱 버그이므로 로그 수집) |
 | `INVALID_LOCATION` | 400 | 좌표 형식 오류, 대한민국 범위 밖 | `서비스 지역(대한민국) 밖의 좌표입니다` | "현재 위치를 확인할 수 없어요. 잠시 후 다시 시도해 주세요." (FusedLocation 재조회) |
 | `INVALID_KEYWORD` | 400 | 정의 안 된 키워드, 4개 이상, 중복 | `keyword_ids 는 정의된 키워드 중 중복 없이 0~3개여야 합니다` | "키워드를 다시 골라 주세요." |
 | `KEYWORD_UNAVAILABLE` | 400 | 고른 키워드가 **모두** 도착 시각에 쓸 수 없음(일출·노을·야경) | `고른 키워드를 도착 예상 시각에는 쓸 수 없어요` | "지금 출발하면 볼 수 없는 키워드예요. 다른 키워드를 골라 주세요." → `/keywords` 다시 호출해 칩 갱신 |
 | `NO_CANDIDATES` | 404 | 조건에 맞는 장소 없음, 또는 모두 도착일 휴무, 또는 `exclude_content_ids` 로 다 빠짐 | `조건에 맞는 장소가 없어요` / `도착 예상 시각에 문을 여는 장소가 없어요` | "조건에 맞는 곳이 없어요. 운전 시간을 늘리거나 키워드를 바꿔 보세요." |
-| `CONDITION_NOT_MET` | 404 | `require_parking`·`exclude_paid` 를 켰는데 상세조회 상한(10곳) 안에서 통과한 곳이 없음 | `주차할 수 있는 곳을 찾지 못했어요` / `유료가 아닌 곳을 찾지 못했어요` / `주차할 수 있고 유료가 아닌 곳을 찾지 못했어요` (켠 조건에 따라) | "조건을 끄거나 운전 시간을 늘려 보세요." 스위치를 바로 끌 수 있게 키워드 화면으로 돌아간다. 자동 재추천 중이면 직전 결과로 안내 |
+| `CONDITION_NOT_MET` | 404 | (`/recommend`) `require_parking`·`exclude_paid` 를 켰는데 상세조회 상한(10곳) 안에서 통과한 곳이 없음 | `주차할 수 있는 곳을 찾지 못했어요` / `유료가 아닌 곳을 찾지 못했어요` / `주차할 수 있고 유료가 아닌 곳을 찾지 못했어요` (켠 조건에 따라) | "조건을 끄거나 운전 시간을 늘려 보세요." 스위치를 바로 끌 수 있게 키워드 화면으로 돌아간다. 자동 재추천 중이면 직전 결과로 안내 |
 | `UPSTREAM_TOUR_API_ERROR` | 502 | 관광 정보 서버 장애 + 서버 캐시 없음 | `관광 정보 서버에서 목록을 가져오지 못했습니다` | "장소 정보를 불러오지 못했어요. 잠시 후 다시 시도해 주세요." |
 | `INTERNAL_ERROR` | 500 | 서버 내부 오류 | `서버 내부 오류` | "잠시 후 다시 시도해 주세요." |
 | (네트워크 실패/타임아웃) | - | 서버 꺼짐, 주소 오류 등 | - | "서버에 연결할 수 없어요. 네트워크를 확인해 주세요." |
@@ -427,7 +538,7 @@ object Keyword {
    좌표계: 서버 좌표는 WGS84 십진 도로 보인다(경복궁 좌표 대조). NaviHelper 문서에는 좌표계가 명시돼 있지 않으니 에뮬레이터에서 한 번 경로를 띄워 확인할 것.
 2. **이미지(`reveal.image_url`)는 출처 "한국관광공사"를 표시하고, 자르거나 덮지 않는다.** 일부 이미지는 공공누리 제3유형(변경 금지)이다. 썸네일이 필요하면 비율을 유지한 채 축소(`fitCenter`)만 한다. `centerCrop`, 텍스트·그라데이션 오버레이는 쓰지 않는다.
 3. **`reveal` 은 도착·주차 전에는 화면에 표시하지 않는다.** 메모리에만 들고 있다가 도착 + 주차 조건이 모두 충족되면 보여 준다. NaviHelper 에도 넘기지 않는다(`address` 는 빈 값). 로그·크래시 리포트에도 찍지 않는다.
-4. [다시 뽑기] 는 직전까지 나온 `reveal.content_id` 를 `exclude_content_ids` 에 누적해서 보낸다(세션 단위). 실제 ETA 초과에 따른 자동 재추천은 `retry_context` 를 쓴다([2-3](#2-3-자동-재추천-retry_context)).
+4. [다시 뽑기] 는 직전까지 나온 `reveal.content_id` 를 `exclude_content_ids` 에 누적해서 보낸다(세션 단위). 실제 ETA 확인·자동 재추천은 `eta-check` 를 쓴다([2-3](#2-3-eta-판단-post-apiv1eta-check)). `retry_context` 는 호환용.
 5. 섬 출발: 제주·울릉도·옹진 섬처럼 다리로 이어지지 않은 곳에서 출발하면 같은 섬 안의 장소만 나오고, 육지에서 출발하면 그런 섬은 나오지 않는다(서버 처리).
 6. 서버 기동 직후 몇 초간은 관광지 목록을 받는 중일 수 있다. `/healthz` 의 `index_spots` 가 0 이면 잠시 후 재시도.
 

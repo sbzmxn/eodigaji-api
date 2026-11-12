@@ -122,6 +122,36 @@ def test_live_conditions(live_client, loc):
     assert j["hint"]["parking"] == "가능" and j["hint"]["fee"] != "유료"
 
 
+# ---- POST /api/v1/eta-check (2곳) ----------------------------------------------------
+ETA_LOCS = [l for l in LOCATIONS if l["name"] in ("서울 강남", "대구")]
+
+
+@pytest.mark.parametrize("loc", ETA_LOCS, ids=[l["name"] for l in ETA_LOCS])
+def test_live_eta_check_flow(live_client, loc):
+    """추천 → 시간 안 ETA 면 accept, 넘으면 retry(새 추천) → 3번째 초과면 fallback."""
+    base = {"latitude": loc["lat"], "longitude": loc["lng"], "drive_minutes": 30, "keyword_ids": [],
+            "require_parking": True}
+    r1 = live_client.post("/api/v1/recommend", json=base).json()
+    first = r1["reveal"]["content_id"]
+    ok = live_client.post("/api/v1/eta-check", json={**base, "content_id": first, "previous_content_ids": [first],
+                                                     "observed_eta_seconds": 1700}).json()
+    assert (ok["decision"], ok["reason"], ok["route_content_id"], ok["attempt"]) == ("accept", "within_limit", first, 1)
+    prev, j = [first], None
+    for attempt in (2, 3):
+        j = live_client.post("/api/v1/eta-check", json={**base, "content_id": prev[-1], "previous_content_ids": prev,
+                                                        "observed_eta_seconds": 2400}).json()
+        if j["decision"] == "fallback":                     # 더 가까운 곳이 없으면 정상적인 fallback
+            assert j["reason"] in ("no_candidates", "condition_not_met") and j["route_content_id"] == prev[-1]
+            return
+        assert j["decision"] == "retry" and j["attempt"] == attempt
+        new = j["recommendation"]
+        assert new["reveal"]["content_id"] not in prev and new["hint"]["parking"] == "가능"   # 조건 유지
+        prev.append(new["reveal"]["content_id"])
+    last = live_client.post("/api/v1/eta-check", json={**base, "content_id": prev[-1], "previous_content_ids": prev,
+                                                       "observed_eta_seconds": 2400}).json()
+    assert (last["decision"], last["reason"], last["route_content_id"]) == ("fallback", "max_attempts", prev[-1])
+
+
 # ---- 새벽(일출) 시간대 ------------------------------------------------------------
 @pytest.fixture(scope="module")
 def dawn_client(real_settings):

@@ -1,7 +1,7 @@
 """API 요청/응답 스키마와 공통 에러 스키마."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,7 +15,8 @@ class RetryContext(BaseModel):
         None, gt=0, le=6 * 3600, description="직전 후보까지 NaviHelper requestTrip 이 준 실제 ETA(초)")
 
 
-class RecommendRequest(BaseModel):
+class SearchFields(BaseModel):
+    """/recommend 와 /eta-check 가 함께 쓰는 검색 조건."""
     model_config = ConfigDict(extra="allow")   # 정의 안 된 필드는 무시(경고 로그). available_minutes 만 거부
 
     latitude: float
@@ -23,9 +24,20 @@ class RecommendRequest(BaseModel):
     drive_minutes: int = Field(description="목적지까지 편도 운전 시간(분), 15~120")
     keyword_ids: list[str] = Field(default_factory=list, max_length=3)
     exclude_content_ids: list[str] = Field(default_factory=list, max_length=200)
-    retry_context: Optional[RetryContext] = None
     require_parking: bool = Field(False, description="true 면 주차 '가능'으로 확인된 곳만 (불가·정보 없음 제외)")
     exclude_paid: bool = Field(False, description="true 면 기본 입장료·이용료 '유료'인 곳 제외 (무료·정보 없음 포함)")
+
+
+class RecommendRequest(SearchFields):
+    retry_context: Optional[RetryContext] = None
+
+
+class EtaCheckRequest(SearchFields):
+    """앱이 requestTrip 으로 잰 ETA 를 보내면 서버가 수락·재추천·포기를 정한다. 서버는 상태를 저장하지 않는다."""
+    content_id: str = Field(min_length=1, max_length=64, description="방금 ETA 를 잰 후보")
+    observed_eta_seconds: int = Field(gt=0, le=6 * 3600, description="그 후보까지 requestTrip ETA(초)")
+    previous_content_ids: list[str] = Field(
+        min_length=1, max_length=200, description="지금까지 나온 후보 전부(오래된 → 최근). 마지막 = content_id")
 
 
 class Destination(BaseModel):
@@ -59,6 +71,16 @@ class RecommendResponse(BaseModel):
     straight_km: float = Field(description="출발지→목적지 직선거리(km, 소수 둘째 자리)")
     estimated_drive_seconds: int = Field(
         description="서버 추정 편도 운전시간(초). retry_context 로 속도를 보정했으면 보정 속도 기준")
+
+
+class EtaCheckResponse(BaseModel):
+    request_id: str
+    decision: Literal["accept", "retry", "fallback"]
+    attempt: int = Field(description="안내할 후보(accept·fallback) 또는 새 추천(retry)이 몇 번째 추천인지")
+    max_attempts: int
+    reason: Literal["within_limit", "over_limit", "max_attempts", "no_candidates", "condition_not_met"]
+    route_content_id: Optional[str] = Field(None, description="accept·fallback 일 때 안내할 content_id")
+    recommendation: Optional[RecommendResponse] = Field(None, description="retry 일 때만 새 추천")
 
 
 class KeywordStatus(BaseModel):

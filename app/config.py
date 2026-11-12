@@ -51,6 +51,11 @@ class RetryCfg(BaseModel):
     min_estimated_seconds: float = 120   # 직전 후보의 추정 운전시간이 이보다 짧으면 보정하지 않음 (잡음)
 
 
+class EtaCheckCfg(BaseModel):
+    tolerance_seconds: int = 0       # ETA <= drive_minutes*60 + 이 값이면 accept
+    max_attempts: int = 3            # 추천 최대 횟수 (첫 추천 포함)
+
+
 class DriveCfg(BaseModel):
     min: int = 15
     max: int = 120
@@ -166,6 +171,7 @@ class Settings(BaseModel):
     radius: RadiusCfg = Field(default_factory=RadiusCfg)
     drive_minutes: DriveCfg = Field(default_factory=DriveCfg)
     retry: RetryCfg = Field(default_factory=RetryCfg)
+    eta_check: EtaCheckCfg = Field(default_factory=EtaCheckCfg)
     candidates: CandidateCfg = Field(default_factory=CandidateCfg)
     conditions: ConditionsCfg = Field(default_factory=ConditionsCfg)
     scoring: ScoringCfg = Field(default_factory=ScoringCfg)

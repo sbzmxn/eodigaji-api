@@ -50,6 +50,7 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 |---|---|---|
 | GET | `/api/v1/keywords?lat=&lng=&drive_minutes=` | 키워드 9개의 활성 여부와 비활성 사유 (예: `"지금 시간으론 멀어요"`, `"일몰은 17:25이에요"`) |
 | POST | `/api/v1/recommend` | 장소 1곳 추천: 목적지 좌표, 힌트(주차·요금·도착 시 운영), 도착 후 공개 정보, 직선거리·서버 추정 운전시간 (+ 호환용 가명). `retry_context` 로 실제 ETA 를 보내면 그 요청만 속도를 보정해 재추천. `require_parking`·`exclude_paid` 조건 |
+| POST | `/api/v1/eta-check` | 앱이 `requestTrip` 으로 잰 ETA 를 보내면 서버가 `accept` / `retry`(새 추천 포함) / `fallback` 을 판단. 상태 저장 없음, 최대 3회 |
 | GET | `/healthz` | 관광지 인덱스 적재 상태 |
 
 ```json
@@ -61,7 +62,7 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 - 에러는 `{"error": {"code", "message", "request_id"}}` 형식입니다.
   코드: `INVALID_REQUEST`, `INVALID_LOCATION`, `INVALID_KEYWORD`, `KEYWORD_UNAVAILABLE`, `NO_CANDIDATES`, `CONDITION_NOT_MET`, `UPSTREAM_TOUR_API_ERROR`, `INTERNAL_ERROR`.
 - 조건: `"require_parking": true` 면 주차 '가능'으로 확인된 곳만, `"exclude_paid": true` 면 '유료' 제외(무료·정보 없음 포함). 점수 상위부터 5곳씩, 요청당 최대 10곳 상세조회. 못 찾으면 `CONDITION_NOT_MET`(404). `/keywords` 도 같은 쿼리를 받아 캐시 기반 추정으로 칩을 끈다.
-- 자동 재추천: 앱이 `requestTrip` 실제 ETA 가 설정 시간을 넘으면 `"retry_context": {"previous_content_ids": [...], "observed_eta_seconds": 1530}` 을 담아 다시 요청한다(최대 3회). 보정값은 저장하지 않는다.
+- 자동 재추천: 앱은 `requestTrip` ETA 를 `POST /api/v1/eta-check` 에 보내고 `decision` 만 따른다. 서버가 시간 비교·횟수(최대 3회)·재추천(속도 보정 + 이전 후보 제외)을 맡는다. 예전 `/recommend` 의 `retry_context` 방식도 호환용으로 동작한다. 보정값은 저장하지 않는다.
 - 서버는 사용자 좌표를 저장·로그하지 않고, 관광 API 로도 보내지 않습니다.
 
 요청·응답 전체 예시, Kotlin 데이터 클래스·Retrofit 인터페이스, 에러별 앱 문구, NaviHelper 주의사항은 **[docs/API_FOR_APP.md](docs/API_FOR_APP.md)** 에 있습니다.

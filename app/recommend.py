@@ -235,6 +235,37 @@ class Recommender:
             return None
         return min(rc.max_speed_factor, max(rc.min_speed_factor, est_s / retry.observed_eta_seconds))
 
+    # ---- /eta-check ---------------------------------------------------------
+    async def eta_check(self, lat: float, lng: float, drive: int, kids: list[str], exclude: list[str],
+                        cond: Conditions, content_id: str, observed_s: int, previous: list[str]) -> dict:
+        """앱이 잰 ETA 로 accept / retry / fallback 을 정한다. 재추천은 recommend(retry=...) 경로를 그대로 쓴다.
+        반환: decision, attempt, max_attempts, reason, route_content_id, recommendation(Outcome | None)."""
+        self._check_location(lat, lng)
+        self._check_drive(drive)
+        self._check_keywords(kids)
+        if not previous or previous[-1] != content_id:
+            raise ApiError("INVALID_REQUEST", "content_id 는 previous_content_ids 의 마지막 원소여야 합니다")
+        ec = self.s.eta_check
+        n = len(previous)
+
+        def result(decision: str, reason: str, attempt: int, outcome: Optional[Outcome] = None) -> dict:
+            return {"decision": decision, "attempt": attempt, "max_attempts": ec.max_attempts, "reason": reason,
+                    "route_content_id": None if outcome else content_id, "recommendation": outcome}
+
+        if observed_s <= drive * 60 + ec.tolerance_seconds:
+            return result("accept", "within_limit", n)
+        if n >= ec.max_attempts:
+            return result("fallback", "max_attempts", n)
+        try:
+            out = await self.recommend(lat, lng, drive, kids, exclude, Retry(previous, observed_s), cond)
+        except ApiError as e:
+            if e.code == "NO_CANDIDATES":
+                return result("fallback", "no_candidates", n)
+            if e.code == "CONDITION_NOT_MET":
+                return result("fallback", "condition_not_met", n)
+            raise
+        return result("retry", "over_limit", n + 1, out)
+
     # ---- /recommend ---------------------------------------------------------
     async def recommend(self, lat: float, lng: float, drive: int, kids: list[str], exclude: list[str],
                         retry: Optional[Retry] = None, cond: Optional[Conditions] = None) -> Outcome:

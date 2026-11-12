@@ -489,3 +489,130 @@ def test_passes_rules():
     assert passes(both, "가능", "무료") and passes(both, "가능", None)
     assert not passes(both, "불가", "무료") and not passes(both, None, "무료") and not passes(both, "가능", "유료")
     assert passes(Conditions(), None, "유료")
+
+
+# ---- POST /api/v1/eta-check ---------------------------------------------------------
+def eta(o, content_id, observed, previous, **over):
+    return {**body(o, **over), "content_id": content_id, "observed_eta_seconds": observed,
+            "previous_content_ids": previous}
+
+
+def test_eta_check_accept(settings, origin):
+    d = FakeDetails()
+    with client(settings, origin, details=d) as c:
+        r = c.post("/api/v1/eta-check", json=eta(origin, "p1", 900, ["p1"]))   # 15분 = 900초 (경계 포함)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j == {"request_id": j["request_id"], "decision": "accept", "attempt": 1, "max_attempts": 3,
+                 "reason": "within_limit", "route_content_id": "p1", "recommendation": None}
+    assert d.calls == []                                                     # 수락은 관광 정보 조회 없음
+
+
+def test_eta_check_tolerance_from_config(settings):
+    o = (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"])
+    with client(settings, o) as c:
+        # edge(5.7km, 서버 추정 약 889초)를 잰 경우: 조금만 넘어도 보정 후 다른 후보가 남는다
+        assert c.post("/api/v1/eta-check", json=eta(o, "edge", 901, ["edge"])).json()["decision"] == "retry"
+    settings.eta_check.tolerance_seconds = 60
+    with client(settings, o) as c:
+        assert c.post("/api/v1/eta-check", json=eta(o, "edge", 960, ["edge"])).json()["decision"] == "accept"
+        assert c.post("/api/v1/eta-check", json=eta(o, "edge", 961, ["edge"])).json()["decision"] == "retry"
+
+
+def test_eta_check_retry_reuses_retry_context_path(settings, origin):
+    rc = {"previous_content_ids": ["p1"], "observed_eta_seconds": 1248}
+    for seed in range(3):
+        with client(settings, origin, spots=_retry_spots(origin), seed=seed) as c:
+            j = c.post("/api/v1/eta-check", json=eta(origin, "p1", 1248, ["p1"])).json()
+        with client(settings, origin, spots=_retry_spots(origin), seed=seed) as c:
+            same = c.post("/api/v1/recommend", json=body(origin, retry_context=rc)).json()
+        assert j["decision"] == "retry" and j["reason"] == "over_limit" and j["attempt"] == 2
+        assert j["route_content_id"] is None
+        rec = j["recommendation"]
+        assert rec["reveal"]["content_id"] == same["reveal"]["content_id"] == "near"     # 속도 보정 + p1 제외
+        assert rec["estimated_drive_seconds"] == same["estimated_drive_seconds"]
+        assert rec["request_id"] == j["request_id"] and set(rec) == set(same)
+
+
+def test_eta_check_fallback_after_max_attempts(settings, origin):
+    d = FakeDetails()
+    with client(settings, origin, details=d) as c:
+        j = c.post("/api/v1/eta-check", json=eta(origin, "p3", 2000, ["p1", "p2", "p3"])).json()
+    assert (j["decision"], j["reason"], j["attempt"], j["route_content_id"]) == ("fallback", "max_attempts", 3, "p3")
+    assert j["recommendation"] is None and d.calls == []                     # 재추천을 만들지 않음
+    settings.eta_check.max_attempts = 2
+    with client(settings, origin) as c:
+        j = c.post("/api/v1/eta-check", json=eta(origin, "p2", 2000, ["p1", "p2"])).json()
+    assert j["decision"] == "fallback" and j["max_attempts"] == 2
+
+
+def test_eta_check_fallback_no_candidates(settings, origin):
+    spots = [make_spot("p1", "가람근린공원", north_km=4.0, base=origin)]
+    with client(settings, origin, spots=spots) as c:
+        r = c.post("/api/v1/eta-check", json=eta(origin, "p1", 1500, ["p1"]))
+    j = r.json()
+    assert r.status_code == 200
+    assert (j["decision"], j["reason"], j["attempt"], j["route_content_id"]) == ("fallback", "no_candidates", 1, "p1")
+
+
+def test_eta_check_fallback_condition_not_met(settings, origin):
+    d = FakeDetails({k: NO_PARK for k in ("p1", "p2", "p3", "w1", "v1")})
+    with client(settings, origin, details=d) as c:
+        r = c.post("/api/v1/eta-check", json=eta(origin, "edge", 950, ["edge"], require_parking=True))
+    j = r.json()
+    assert r.status_code == 200
+    assert (j["decision"], j["reason"], j["route_content_id"]) == ("fallback", "condition_not_met", "edge")
+
+
+def test_eta_check_retry_keeps_conditions(settings, origin):
+    spots = _retry_spots(origin) + [make_spot("near2", "작은쉼터", east_km=2.5, lcls3="VE030400", base=origin)]
+    d = FakeDetails({"near": NO_PARK, "near2": OK_PARK}, fees={"near2": "무료"})
+    with client(settings, origin, details=d, spots=spots) as c:
+        j = c.post("/api/v1/eta-check", json=eta(origin, "p1", 1248, ["p1"], require_parking=True,
+                                                 exclude_paid=True)).json()
+    assert j["decision"] == "retry"
+    rec = j["recommendation"]
+    assert rec["reveal"]["content_id"] == "near2" and rec["hint"]["parking"] == "가능" and rec["hint"]["fee"] == "무료"
+
+
+def test_eta_check_previous_ids_and_excludes_are_excluded(settings, origin):
+    with client(settings, origin) as c:
+        for seed in range(4):
+            j = c.post("/api/v1/eta-check", json=eta(origin, "edge", 950, ["p1", "edge"],  # edge 추정 889초
+                                                     exclude_content_ids=["p3", "v1"])).json()
+            assert j["decision"] == "retry" and j["attempt"] == 3
+            assert j["recommendation"]["reveal"]["content_id"] in {"p2", "w1"}      # p1·edge·p3·v1 제외
+
+
+@pytest.mark.parametrize("over,code", [
+    ({"content_id": "p2"}, "INVALID_REQUEST"),                               # 마지막 원소가 아님
+    ({"observed_eta_seconds": 0}, "INVALID_REQUEST"),
+    ({"observed_eta_seconds": -30}, "INVALID_REQUEST"),
+    ({"observed_eta_seconds": "abc"}, "INVALID_REQUEST"),
+    ({"previous_content_ids": []}, "INVALID_REQUEST"),
+    ({"content_id": None}, "INVALID_REQUEST"),
+    ({"drive_minutes": 10}, "INVALID_REQUEST"),                              # accept 경로도 같은 검증
+    ({"keyword_ids": ["mountain"]}, "INVALID_KEYWORD"),
+    ({"latitude": 0.0}, "INVALID_LOCATION"),
+    ({"available_minutes": 30}, "INVALID_REQUEST"),
+])
+def test_eta_check_validation(settings, over, code):
+    o = (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"])
+    b = {**eta(o, "p1", 600, ["p2", "p1"]), **over}
+    if over.get("content_id", "") is None:
+        b.pop("content_id")
+    with client(settings, o) as c:
+        r = c.post("/api/v1/eta-check", json=b)
+    e = r.json()["error"]
+    assert r.status_code == 400 and e["code"] == code and "abc" not in e["message"]
+
+
+def test_eta_check_log_has_eta_but_no_coordinates(settings, caplog):
+    o = (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"])
+    caplog.set_level(logging.INFO)
+    with client(settings, o) as c:
+        c.post("/api/v1/eta-check", json=eta(o, "edge", 1000, ["edge"]))
+    logs = "\n".join(x.getMessage() for x in caplog.records)
+    line = next(m for m in logs.splitlines() if m.startswith("eta-check"))
+    assert "content_id=edge" in line and "eta_s=1000" in line and "decision=retry" in line
+    assert str(o[0]) not in logs and str(o[1]) not in logs and f"{o[0]:.3f}" not in logs

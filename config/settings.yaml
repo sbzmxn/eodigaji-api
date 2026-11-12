@@ -46,6 +46,11 @@ retry:
   max_speed_factor: 2.0
   min_estimated_seconds: 120   # 직전 후보가 2분 거리 미만이면 보정하지 않음
 
+# POST /api/v1/eta-check: 앱이 보낸 실제 ETA 로 수락(accept)·재추천(retry)·포기(fallback)를 정한다.
+eta_check:
+  tolerance_seconds: 0         # ETA <= drive_minutes*60 + 오차 이면 accept
+  max_attempts: 3              # 추천 최대 횟수(첫 추천 포함). 넘으면 fallback(방금 후보로 안내)
+
 candidates:
   max_candidates: 20       # 1차 점수 상위 N개만 다음 단계로
   min_for_keyword: 3       # /keywords: 후보가 이보다 적으면 비활성

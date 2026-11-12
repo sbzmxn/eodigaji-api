@@ -67,35 +67,49 @@ val routeInfo = RouteInfo(
 ```
 
 - 언박싱 조건: 도착 이벤트(또는 FusedLocation 근접 알림) **그리고** 주차(기어 P) 상태.
-- 저장소 관리자에게 알려 줄 것: 도착 이벤트 이름, poiId·poiSubId에 넣은 값, 기어 P 속성 이름. (`requestTrip` 1회 최대 약 1초 — 확인 완료)
 
-### 재추천 흐름 (실제 ETA 확인)
+### 재추천 흐름 (`eta-check`)
 
-서버의 운전시간은 직선거리로 추정한 값이라 실제와 다를 수 있습니다. 안내를 시작하기 전에 `requestTrip`으로 실제 ETA를 확인하고, 설정 시간을 넘으면 서버에 다시 요청합니다. 자세한 필드는 [`API_FOR_APP.md` 2-3](API_FOR_APP.md#2-3-자동-재추천-retry_context).
+서버의 운전시간은 직선거리로 추정한 값이라 실제와 다를 수 있습니다. 안내를 시작하기 전에 `requestTrip`으로 실제 ETA를 재서 **서버에 보내기만 하면**, 서버가 시간 안인지 판단하고 필요하면 재추천까지 해서 돌려줍니다. 앱은 시간 비교와 횟수 세기를 하지 않고 `decision`만 따릅니다. 자세한 필드는 [`API_FOR_APP.md` 2-3](API_FOR_APP.md#2-3-eta-판단-post-apiv1eta-check).
 
-1. `/api/v1/recommend` 호출 (첫 회는 `retry_context` 없이).
-2. 응답 `destination`으로 NaviHelper `requestTrip` → 실제 ETA(초).
-3. ETA ≤ `drive_minutes × 60` 이면 확정 → `requestRoute`로 안내 시작.
-4. 초과면 `retry_context = {previous_content_ids: 지금까지 나온 content_id 전부(마지막=직전 후보), observed_eta_seconds: 방금 ETA}`를 담아 1번으로. **추천은 최대 3회**.
-5. 3회 모두 초과하거나 재요청이 `NO_CANDIDATES`·`CONDITION_NOT_MET`이면 마지막으로 받은 결과로 안내합니다.
-6. `baseRequest`에는 사용자가 켠 조건(`requireParking`, `excludePaid`)이 들어 있어야 합니다. 재추천 때 조건을 빼지 않습니다.
+1. `/api/v1/recommend`로 첫 추천을 받습니다.
+2. 그 `destination`으로 `requestTrip` → ETA(초).
+3. `/api/v1/eta-check`에 검색 조건 전부 + `content_id`(방금 후보) + ETA + `previous_content_ids`(지금까지 받은 후보 전부, 마지막=방금 후보)를 보냅니다.
+4. `decision`
+   - `retry`: 같이 온 `recommendation`이 다음 후보입니다. 2번으로 돌아갑니다. 로딩 화면에 `attempt`/`max_attempts`를 보여 줍니다.
+   - `accept`·`fallback`: `route_content_id`의 추천으로 `requestRoute` 안내를 시작합니다(앱이 들고 있는 추천 중에서 찾습니다).
+5. 전체 **12초 제한은 앱이 겁니다.** 넘거나 `eta-check`가 에러면 마지막으로 받은 추천으로 안내합니다.
 
 ```kotlin
-val previous = mutableListOf<String>()
-var observed: Int? = null
-var res: RecommendResponse? = null
-for (attempt in 1..3) {
-    val retry = if (previous.isEmpty()) null else RetryContext(previous.toList(), observed)
-    val r = api.recommend(baseRequest.copy(retryContext = retry)).body() ?: break
-    res = r
-    previous += r.reveal.contentId
-    val eta = requestTripEtaSeconds(r.destination)   // requestTrip 결과를 초로
-    observed = eta
-    if (eta <= driveMinutes * 60) break
+// 앱은 ETA 비교·횟수 세기를 하지 않는다. decision 만 따른다.
+val seen = linkedMapOf<String, RecommendResponse>()      // content_id → 추천 (받은 순서 유지)
+var current: RecommendResponse? = null
+
+withTimeoutOrNull(12_000) {                               // 전체 제한 12초 (앱)
+    val first = api.recommend(baseRequest).body() ?: return@withTimeoutOrNull
+    seen[first.reveal.contentId] = first
+    current = first
+    while (true) {
+        val c = current!!
+        val eta = requestTripEtaSeconds(c.destination)   // NaviHelper requestTrip, 초
+        val res = api.etaCheck(baseRequest.toEtaCheck(c.reveal.contentId, eta, seen.keys.toList()))
+            .body() ?: break                              // 에러 → 지금 후보로 안내
+        if (res.decision == "retry") {
+            val next = res.recommendation!!
+            seen[next.reveal.contentId] = next
+            current = next
+            showLoadingStep(res.attempt, res.maxAttempts) // "가까운 곳을 다시 찾는 중…(2/3)"
+        } else {                                          // accept · fallback
+            current = seen[res.routeContentId] ?: c
+            break
+        }
+    }
 }
-// res 로 requestRoute (res 가 null 이면 에러 화면)
+// current 로 requestRoute (12초를 넘겨도 마지막으로 받은 추천). null 이면 에러 화면.
 ```
 
+- `baseRequest`에는 사용자가 켠 조건(`requireParking`, `excludePaid`)이 들어 있어야 합니다. `toEtaCheck`([`API_FOR_APP.md` 3장](API_FOR_APP.md#3-kotlin-gson--retrofit))가 같은 조건을 그대로 옮깁니다.
+- 호환용: 예전 방식(앱이 직접 비교하고 `/recommend`에 `retry_context`를 담아 재요청)도 그대로 동작합니다. 새 코드에서는 쓰지 않습니다.
 - `requestTrip`에도 `RouteInfo`를 넘긴다면 위와 같이 `poiName`은 가명, `address`는 빈 값으로 넘깁니다.
 - 앱 총 대기 시간 = 서버 시간(합계) + `requestTrip` 시간(최대 약 1초) × 횟수. 시연은 서버가 노트북 안(`10.0.2.2`)이라 네트워크 왕복은 0으로 봅니다.
   3회 모두 돌 때: 상세 캐시 없음 p95 2.3 + 3 = 5.3초, 최악 4.2 + 3 = 7.2초 / 캐시 있음 약 3.2초. **전체 제한 12초**, 넘으면 마지막으로 받은 추천으로 안내합니다.
