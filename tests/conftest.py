@@ -58,20 +58,30 @@ DEFAULT_DETAIL = Detail(overview="조용히 쉬기 좋은 곳이다.", parking="
 
 
 class FakeDetails:
-    def __init__(self, details=None, fee="무료"):
+    """details: content_id→Detail, fees: content_id→요금(없으면 fee). cached/cached_fee 에 든 곳은 peek 로 보인다."""
+    def __init__(self, details=None, fee="무료", fees=None, cached=(), cached_fee=()):
         self.d = details or {}
         self.fee_val = fee
+        self.fees = fees or {}
+        self.cached, self.cached_fee = set(cached), set(cached_fee)
         self.calls = []
+        self.fee_calls = []
 
     def peek(self, spot):
-        return None
+        return self.d.get(spot.content_id, DEFAULT_DETAIL) if spot.content_id in self.cached else None
+
+    def peek_fee(self, spot):
+        if spot.content_id in self.cached_fee:
+            return True, self.fees.get(spot.content_id, self.fee_val)
+        return False, None
 
     async def get(self, spot):
         self.calls.append(spot.content_id)
         return self.d.get(spot.content_id, DEFAULT_DETAIL)
 
     async def fee(self, spot):
-        return self.fee_val
+        self.fee_calls.append(spot.content_id)
+        return self.fees.get(spot.content_id, self.fee_val)
 
 
 def base_words(settings):

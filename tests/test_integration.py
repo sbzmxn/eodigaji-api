@@ -91,6 +91,37 @@ def test_live_retry_with_slow_eta(live_client, loc):
         assert j2["straight_km"] <= radius_km(30 * factor, s.radius) + 0.01
 
 
+# ---- 추천 조건 (require_parking, exclude_paid) --------------------------------------
+# 조건을 켜면 요청당 최대 30회(10곳 × 상세 2 + 요금 1)까지 호출할 수 있어, 이 앱의 누적 호출이 상한에 가까우면 건너뛴다.
+COND_CALL_CAP = int(__import__("os").environ.get("INTEGRATION_COND_MAX_CALLS", "70"))
+
+
+@pytest.mark.parametrize("loc", LOCATIONS, ids=[l["name"] for l in LOCATIONS])
+def test_live_conditions(live_client, loc):
+    q = {"lat": loc["lat"], "lng": loc["lng"], "drive_minutes": 30}
+    plain = {k["id"]: k for k in live_client.get("/api/v1/keywords", params=q).json()["keywords"]}
+    rk = live_client.get("/api/v1/keywords", params={**q, "require_parking": "true", "exclude_paid": "true"})
+    assert rk.status_code == 200
+    cond = {k["id"]: k for k in rk.json()["keywords"]}
+    assert list(cond) == list(plain)
+    for k, v in cond.items():                                   # 조건은 칩을 끄기만 한다
+        assert not v["enabled"] or plain[k]["enabled"]
+        if plain[k]["enabled"] and not v["enabled"]:
+            assert v["reason"] == "조건에 맞는 곳이 적어요"
+    tour = live_client.app.state.index.tour
+    if tour.calls + 30 > COND_CALL_CAP:
+        pytest.skip(f"관광 API 상한 보호 (이 앱 누적 {tour.calls}회)")
+    rr = live_client.post("/api/v1/recommend", json={"latitude": loc["lat"], "longitude": loc["lng"],
+                                                     "drive_minutes": 30, "keyword_ids": [],
+                                                     "require_parking": True, "exclude_paid": True})
+    if rr.status_code == 404:
+        assert rr.json()["error"]["code"] == "CONDITION_NOT_MET"
+        return
+    assert rr.status_code == 200, rr.text
+    j = rr.json()
+    assert j["hint"]["parking"] == "가능" and j["hint"]["fee"] != "유료"
+
+
 # ---- 새벽(일출) 시간대 ------------------------------------------------------------
 @pytest.fixture(scope="module")
 def dawn_client(real_settings):

@@ -18,8 +18,12 @@
 3. 화면 규칙
    - 운전 시간 → 키워드 순서로 입력받습니다. 시간이 바뀌면 `/api/v1/keywords`를 다시 불러 칩 상태를 갱신하고, 꺼진 칩은 선택을 자동 해제합니다.
    - 꺼진 칩은 회색으로 그리고 `reason` 문구를 그대로 보여 줍니다.
+   - 키워드 화면에 스위치 두 개를 둡니다: **"주차 가능한 곳만"**(`require_parking`), **"유료 체험 제외"**(`exclude_paid`). 기본은 둘 다 꺼짐.
+     - 스위치가 바뀌면 `/api/v1/keywords`를 같은 값으로 다시 불러 칩을 갱신합니다. 조건 때문에 꺼진 칩은 `reason`이 "조건에 맞는 곳이 적어요"입니다(서버 추정치).
+     - `/api/v1/recommend`에도 같은 두 값을 보냅니다(자동 재추천 때도 그대로).
+     - `CONDITION_NOT_MET`(404)이 오면 "조건을 끄거나 운전 시간을 늘려 보세요."를 보여 주고 키워드 화면으로 돌아가 스위치를 바로 끌 수 있게 합니다.
    - 가명은 추천 결과·주행 중 화면에만 보여 줍니다. 한 줄로 표시합니다.
-   - 힌트 카드 표시 규칙 (`null`도 아래 규칙으로 표시합니다)
+   - 결과 화면 힌트 카드 표시 규칙 (`null`도 아래 규칙으로 표시합니다. 조건 스위치를 켰으면 해당 항목은 항상 "주차 가능" / "무료 체험 또는 알 수 없음"이 됩니다)
 
      | 서버 값 | 표시 문구 |
      |---|---|
@@ -73,7 +77,8 @@ val routeInfo = RouteInfo(
 2. 응답 `destination`으로 NaviHelper `requestTrip` → 실제 ETA(초).
 3. ETA ≤ `drive_minutes × 60` 이면 확정 → `requestRoute`로 안내 시작.
 4. 초과면 `retry_context = {previous_content_ids: 지금까지 나온 content_id 전부(마지막=직전 후보), observed_eta_seconds: 방금 ETA}`를 담아 1번으로. **추천은 최대 3회**.
-5. 3회 모두 초과하거나 재요청이 `NO_CANDIDATES`면 마지막으로 받은 결과로 안내합니다.
+5. 3회 모두 초과하거나 재요청이 `NO_CANDIDATES`·`CONDITION_NOT_MET`이면 마지막으로 받은 결과로 안내합니다.
+6. `baseRequest`에는 사용자가 켠 조건(`requireParking`, `excludePaid`)이 들어 있어야 합니다. 재추천 때 조건을 빼지 않습니다.
 
 ```kotlin
 val previous = mutableListOf<String>()

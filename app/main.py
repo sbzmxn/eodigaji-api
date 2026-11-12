@@ -20,7 +20,7 @@ from .alias import AliasPool, build_region_words, build_type_words, build_unit_w
 from .audit import AuditSink, LogSink, RequestMeta
 from .cache import DiskCache
 from .config import Settings, get_settings
-from .recommend import ApiError, Recommender, Retry, new_request_id
+from .recommend import ApiError, Conditions, Recommender, Retry, new_request_id
 from .schemas import ERROR_CODES, ErrorResponse, KeywordsResponse, RecommendRequest, RecommendResponse
 from .spots import DetailService, IndexManager
 from .tour_client import TourClient
@@ -164,10 +164,12 @@ def create_app(
 
     @app.get("/api/v1/keywords", response_model=KeywordsResponse, responses=errors)
     async def keywords(request: Request, lat: float = Query(...), lng: float = Query(...),
-                       drive_minutes: int = Query(...)):
-        res = await rec.keywords_status(lat, lng, drive_minutes)
+                       drive_minutes: int = Query(...), require_parking: bool = Query(False),
+                       exclude_paid: bool = Query(False)):
+        res = await rec.keywords_status(lat, lng, drive_minutes, Conditions(require_parking, exclude_paid))
         request.state.meta.n_candidates = res.pop("_n")
         res.pop("_counts", None)
+        res.pop("_estimated", None)
         return {"request_id": request.state.meta.request_id, **res}
 
     @app.post("/api/v1/recommend", response_model=RecommendResponse, responses=errors)
@@ -181,7 +183,8 @@ def create_app(
         rc = body.retry_context
         retry = Retry(rc.previous_content_ids, rc.observed_eta_seconds) if rc else None
         out = await rec.recommend(body.latitude, body.longitude, body.drive_minutes,
-                                  body.keyword_ids, body.exclude_content_ids, retry)
+                                  body.keyword_ids, body.exclude_content_ids, retry,
+                                  Conditions(body.require_parking, body.exclude_paid))
         meta: RequestMeta = request.state.meta
         meta.n_candidates = out.n_candidates
         meta.alias_source = out.alias_source

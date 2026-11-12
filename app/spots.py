@@ -237,6 +237,13 @@ class DetailService:
         entry = self.cache.get_entry("detail", spot.content_id)
         return Detail(**entry["value"]) if self._valid(entry, spot) else None
 
+    def peek_fee(self, spot: Spot) -> tuple[bool, Optional[str]]:
+        """API 를 부르지 않고 (캐시에 있는지, 요금 값)."""
+        if spot.content_id not in self.cache.keys("fee"):
+            return False, None
+        entry = self.cache.get_entry("fee", spot.content_id)
+        return (True, entry["value"]) if self._valid(entry, spot) else (False, None)
+
     async def get(self, spot: Spot) -> Detail:
         entry = self.cache.get_entry("detail", spot.content_id)
         if self._valid(entry, spot):

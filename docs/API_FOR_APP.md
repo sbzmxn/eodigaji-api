@@ -1,13 +1,13 @@
 # 어디가지? 추천 서버 API — 앱 팀용
 
-> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds`, 키워드 `sunrise` 추가). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
+> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds`, 키워드 `sunrise`, 추천 조건 `require_parking`·`exclude_paid` 추가). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
 > 시연 때 서버는 노트북 안에서 돌고 에뮬레이터는 `http://10.0.2.2:8000/` 으로 붙는다. 다른 환경(ngrok 등)이면 아래 `BASE` 를 바꿔 쓰면 된다.
 
 ## 0. 한눈에 보기
 
 | 순서 | 호출 | 언제 |
 |---|---|---|
-| 1 | `GET /api/v1/keywords` | 운전 시간 슬라이더가 바뀔 때(디바운스 300ms 권장). 키워드 칩의 활성/비활성과 안내 문구 |
+| 1 | `GET /api/v1/keywords` | 운전 시간 슬라이더나 조건 스위치(주차 가능한 곳만·유료 체험 제외)가 바뀔 때(디바운스 300ms 권장). 키워드 칩의 활성/비활성과 안내 문구 |
 | 2 | `POST /api/v1/recommend` | [뽑기] / [다시 뽑기] |
 | 3 | (앱) NaviHelper `requestTrip` | 실제 ETA(초) 확인. `drive_minutes × 60` 을 넘으면 `retry_context` 를 담아 2번을 다시 호출(최대 3회, [2-3](#2-3-자동-재추천-retry_context)) |
 | 4 | (앱) NaviHelper `requestRoute` | 응답의 `destination` 좌표 + 앱이 `BlindNames.pick()` 으로 고른 가명 |
@@ -43,6 +43,8 @@ curl "$BASE/healthz"
 | `lat` | Double | ✔ | 현재 위도 (WGS84 십진 도) |
 | `lng` | Double | ✔ | 현재 경도 |
 | `drive_minutes` | Int | ✔ | 편도 운전 시간 15~120 |
+| `require_parking` | Boolean | | 기본 `false`. [주차 가능한 곳만] 스위치. `/recommend` 와 같은 값을 보낸다 |
+| `exclude_paid` | Boolean | | 기본 `false`. [유료 체험 제외] 스위치 |
 
 응답 200 (서울 강남, 30분, 20:59 호출 → 도착 21:29)
 
@@ -69,6 +71,7 @@ curl "$BASE/healthz"
 - `enabled=false` 면 칩을 비활성으로 그리고 `reason` 을 그대로 보여 준다. `reason` 은 `enabled=true` 일 때 `null`.
 - 비활성 사유 문구는 서버가 정한다:
   - `지금 시간으론 멀어요` — 이 운전 시간 안에 해당 장소가 3곳 미만
+  - `조건에 맞는 곳이 적어요` — 조건 스위치를 켰을 때, 조건에 맞을 것으로 **추정**되는 곳이 3곳 미만. 추정은 서버 캐시에 있는 주차·요금 정보로 하고, 모르는 곳은 통과율(주차 0.7, 요금 0.95)로 센다. 추정이라 켜져 있어도 `/recommend` 가 `CONDITION_NOT_MET` 을 줄 수 있다
   - `일출은 HH:MM이에요` — 일출: 도착 예상이 일출 30분 전 ~ 일출 시각이 아님 (도착일의 일출, 좌표로 로컬 계산)
   - `일몰은 HH:MM이에요` — 노을: 도착 예상이 일몰 60분 전 ~ 20분 후가 아님
   - `HH:MM 이후 도착부터 볼 수 있어요` / `야경 안내는 23:00까지예요` — 야경: 일몰 30분 후 ~ 23:00
@@ -84,7 +87,9 @@ curl "$BASE/healthz"
   "longitude": 127.0276,
   "drive_minutes": 30,
   "keyword_ids": ["forest", "walk"],
-  "exclude_content_ids": []
+  "exclude_content_ids": [],
+  "require_parking": false,
+  "exclude_paid": false
 }
 ```
 
@@ -95,6 +100,14 @@ curl "$BASE/healthz"
 | `keyword_ids` | List<String> | | 0~3개, 중복 없이. 0개 = "키워드 없이 뽑기". `/keywords` 에서 `enabled=true` 인 것만 보내기 |
 | `exclude_content_ids` | List<String> | | [다시 뽑기] 때 이 세션에서 이미 나온 `reveal.content_id` 들 (최대 200) |
 | `retry_context` | Object | | 자동 재추천 때만. 아래 [2-3](#2-3-자동-재추천-retry_context) |
+| `require_parking` | Boolean | | 기본 `false`. `true` 면 주차가 `"가능"` 으로 확인된 곳만 추천(불가·정보 없음 제외) |
+| `exclude_paid` | Boolean | | 기본 `false`. `true` 면 기본 입장료·이용료가 `"유료"` 인 곳 제외(무료·정보 없음은 포함) |
+
+조건(`require_parking`, `exclude_paid`) 처리
+- 점수 상위 후보부터 5곳씩 병렬로 상세 정보를 조회해, 조건을 통과한 곳이 3곳이 되면 멈춘다. 요청당 최대 10곳까지만 조회한다.
+- 서버 캐시에 이미 불가·정보 없음(주차)·유료로 확인된 곳은 조회 없이 뺀다.
+- 10곳 안에서 한 곳도 통과하지 못하면 `CONDITION_NOT_MET`(404). 1곳이라도 통과하면 그중에서 고른다.
+- 자동 재추천(`retry_context`)과 함께 보내면 속도 보정·제외 후의 후보에 조건을 적용한다. **재추천 때도 같은 조건 값을 그대로 보낸다.**
 
 정의되지 않은 필드는 서버가 무시한다(경고 로그만). 단 `available_minutes` 는 400.
 
@@ -134,7 +147,16 @@ curl "$BASE/healthz"
 | `straight_km` | 표시하지 않음(디버그용) | 출발지→목적지 직선거리 km (소수 둘째 자리) |
 | `estimated_drive_seconds` | 표시하지 않음(재추천 판단 참고) | 서버 추정 편도 운전시간(초). 도로 경로가 아닌 직선거리 기반 추정이므로 **재추천 여부는 `requestTrip` 의 실제 ETA 로 판단**한다. `retry_context` 로 보정했으면 보정 속도 기준 |
 
-힌트 문구 규칙(TEAM_HANDOFF.md '앱 화면(UI)'과 같음): `parking` 이 `"가능"` 이면 "주차 가능", 아니면(`"불가"`·`null`) "주차 불가 또는 알 수 없음". `fee` 가 `"유료"` 면 "유료 체험", 아니면(`"무료"`·`null`) "무료 체험 또는 알 수 없음". `open_now` 가 `null` 이면 숨긴다.
+결과 화면 표시 규칙(TEAM_HANDOFF.md '앱 화면(UI)'과 같음)
+
+| 서버 값 | 표시 문구 | 조건을 켰을 때 |
+|---|---|---|
+| `hint.parking == "가능"` | 주차 가능 | `require_parking=true` 면 항상 이 문구 |
+| 그 외(`"불가"`, `null`) | 주차 불가 또는 알 수 없음 | `require_parking=true` 면 나오지 않음 |
+| `hint.fee == "유료"` | 유료 체험 | `exclude_paid=true` 면 나오지 않음 |
+| 그 외(`"무료"`, `null`) | 무료 체험 또는 알 수 없음 | `exclude_paid=true` 면 항상 이 문구 |
+
+`open_now` 가 `null` 이면 숨긴다.
 
 ### 2-3. 자동 재추천 (`retry_context`)
 
@@ -222,6 +244,7 @@ for (attempt in 1..3) {
 - 로딩 화면 전체 제한 시간 **12초** (실측 최악 7.2초 + 여유). 넘으면 그때까지 받은 마지막 추천으로 안내하고, 하나도 없으면 "잠시 후 다시 시도해 주세요".
 - `/recommend` 호출 1회 타임아웃 10초. 단 전체 12초 안에서 남은 시간을 넘지 않게 한다.
 - 로딩 연출은 캐시가 있어 금방 끝나도 **최소 1.5초** 보여 준다(뽑기 느낌 유지, 깜빡임 방지).
+- 조건 스위치를 켜면 요청 1회에 상세조회가 최대 10곳(5곳씩 2번 병렬)으로 늘어난다. 2026-11-13 프로토타입 측정(7곳, 30분, 두 조건 모두)에서 캐시 없음 p50 0.20초 / 최대 0.49초, 캐시 있음 수 ms였다. 위 제한 시간 12초는 그대로 둔다.
 - 로딩 화면에는 "가까운 곳을 다시 찾는 중…"처럼 재추천 단계(1/3, 2/3…)를 보여 주면 대기가 덜 길게 느껴진다.
 
 ## 3. Kotlin (Gson + Retrofit)
@@ -258,6 +281,8 @@ data class RecommendRequest(
     @SerializedName("keyword_ids") val keywordIds: List<String> = emptyList(),
     @SerializedName("exclude_content_ids") val excludeContentIds: List<String> = emptyList(),
     @SerializedName("retry_context") val retryContext: RetryContext? = null,   // 자동 재추천 때만
+    @SerializedName("require_parking") val requireParking: Boolean = false,    // [주차 가능한 곳만]
+    @SerializedName("exclude_paid") val excludePaid: Boolean = false,          // [유료 체험 제외]
 )
 
 data class RetryContext(
@@ -312,6 +337,8 @@ interface EodigajiApi {
         @Query("lat") lat: Double,
         @Query("lng") lng: Double,
         @Query("drive_minutes") driveMinutes: Int,
+        @Query("require_parking") requireParking: Boolean = false,
+        @Query("exclude_paid") excludePaid: Boolean = false,
     ): Response<KeywordsResponse>
 
     @POST("api/v1/recommend")
@@ -350,6 +377,7 @@ val api = retrofit2.Retrofit.Builder()
 | `INVALID_KEYWORD` | 400 | 정의 안 된 키워드, 4개 이상, 중복 | `keyword_ids 는 정의된 키워드 중 중복 없이 0~3개여야 합니다` | "키워드를 다시 골라 주세요." |
 | `KEYWORD_UNAVAILABLE` | 400 | 고른 키워드가 **모두** 도착 시각에 쓸 수 없음(일출·노을·야경) | `고른 키워드를 도착 예상 시각에는 쓸 수 없어요` | "지금 출발하면 볼 수 없는 키워드예요. 다른 키워드를 골라 주세요." → `/keywords` 다시 호출해 칩 갱신 |
 | `NO_CANDIDATES` | 404 | 조건에 맞는 장소 없음, 또는 모두 도착일 휴무, 또는 `exclude_content_ids` 로 다 빠짐 | `조건에 맞는 장소가 없어요` / `도착 예상 시각에 문을 여는 장소가 없어요` | "조건에 맞는 곳이 없어요. 운전 시간을 늘리거나 키워드를 바꿔 보세요." |
+| `CONDITION_NOT_MET` | 404 | `require_parking`·`exclude_paid` 를 켰는데 상세조회 상한(10곳) 안에서 통과한 곳이 없음 | `주차할 수 있는 곳을 찾지 못했어요` / `유료가 아닌 곳을 찾지 못했어요` / `주차할 수 있고 유료가 아닌 곳을 찾지 못했어요` (켠 조건에 따라) | "조건을 끄거나 운전 시간을 늘려 보세요." 스위치를 바로 끌 수 있게 키워드 화면으로 돌아간다. 자동 재추천 중이면 직전 결과로 안내 |
 | `UPSTREAM_TOUR_API_ERROR` | 502 | 관광 정보 서버 장애 + 서버 캐시 없음 | `관광 정보 서버에서 목록을 가져오지 못했습니다` | "장소 정보를 불러오지 못했어요. 잠시 후 다시 시도해 주세요." |
 | `INTERNAL_ERROR` | 500 | 서버 내부 오류 | `서버 내부 오류` | "잠시 후 다시 시도해 주세요." |
 | (네트워크 실패/타임아웃) | - | 서버 꺼짐, 주소 오류 등 | - | "서버에 연결할 수 없어요. 네트워크를 확인해 주세요." |

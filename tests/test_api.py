@@ -345,3 +345,147 @@ def test_recommend_sunrise_at_dawn(settings, origin):
         j = c.post("/api/v1/recommend", json=body(origin, keyword_ids=["sunrise"])).json()
     assert j["reveal"]["content_id"] in {"s1", "w1", "v1"}                  # 바다·물가·전망만
     assert "sunrise" in j["reveal"]["matched_keywords"]
+
+
+# ---- 추천 조건 (require_parking, exclude_paid) ------------------------------------
+NO_PARK = Detail(overview="쉼", parking="불가", restdate="연중무휴", usetime="상시")
+UNKNOWN_PARK = Detail(overview="쉼", parking="", restdate="연중무휴", usetime="상시")
+OK_PARK = Detail(overview="쉼", parking="가능", restdate="연중무휴", usetime="상시")
+
+
+def _parks(o, n=14):
+    """산책 후보 n곳 (drive 15 기준 운전시간 대역 안, 점수 비슷)."""
+    return [make_spot(f"k{i:02d}", f"공원{i}", north_km=3.6 + 0.1 * i, lcls3="VE030400", base=o) for i in range(n)]
+
+
+def test_require_parking_only_confirmed(settings, origin):
+    d = FakeDetails({"p1": NO_PARK, "p2": NO_PARK, "p3": UNKNOWN_PARK, "edge": UNKNOWN_PARK, "w1": OK_PARK,
+                     "v1": OK_PARK})
+    for seed in range(6):
+        with client(settings, origin, details=d, seed=seed) as c:
+            j = c.post("/api/v1/recommend", json=body(origin, require_parking=True)).json()
+        assert j["reveal"]["content_id"] in {"w1", "v1"} and j["hint"]["parking"] == "가능"
+
+
+def test_exclude_paid_keeps_free_and_unknown(settings, origin):
+    fees = {"p1": "유료", "p2": "유료", "w1": "유료", "v1": "유료", "edge": "유료", "p3": None}
+    d = FakeDetails(fees=fees)
+    for seed in range(4):
+        with client(settings, origin, details=d, seed=seed) as c:
+            j = c.post("/api/v1/recommend", json=body(origin, exclude_paid=True)).json()
+        assert j["reveal"]["content_id"] == "p3" and j["hint"]["fee"] is None    # 정보 없음은 포함
+    with client(settings, origin, details=FakeDetails(fees={"p1": "무료"}, fee="유료")) as c:
+        j = c.post("/api/v1/recommend", json=body(origin, exclude_paid=True)).json()
+    assert j["reveal"]["content_id"] == "p1" and j["hint"]["fee"] == "무료"
+
+
+def test_both_conditions(settings, origin):
+    d = FakeDetails({"p1": NO_PARK, "edge": NO_PARK, "w1": OK_PARK, "v1": OK_PARK, "p2": OK_PARK, "p3": OK_PARK},
+                    fees={"w1": "유료", "p2": "유료", "p3": "유료"})
+    with client(settings, origin, details=d) as c:
+        j = c.post("/api/v1/recommend", json=body(origin, require_parking=True, exclude_paid=True)).json()
+    assert j["reveal"]["content_id"] == "v1"
+
+
+@pytest.mark.parametrize("over,msg", [
+    ({"require_parking": True}, "주차할 수 있는 곳을 찾지 못했어요"),
+    ({"exclude_paid": True}, "유료가 아닌 곳을 찾지 못했어요"),
+    ({"require_parking": True, "exclude_paid": True}, "주차할 수 있고 유료가 아닌 곳을 찾지 못했어요"),
+])
+def test_condition_not_met(settings, over, msg):
+    o = (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"])
+    d = FakeDetails({k: NO_PARK for k in ("p1", "p2", "p3", "w1", "v1", "edge")}, fee="유료")
+    with client(settings, o, details=d) as c:
+        r = c.post("/api/v1/recommend", json=body(o, **over))
+        plain = c.post("/api/v1/recommend", json=body(o))                 # 조건 끄면 정상
+    e = r.json()["error"]
+    assert r.status_code == 404 and e["code"] == "CONDITION_NOT_MET" and e["message"] == msg
+    assert plain.status_code == 200
+
+
+def test_condition_lookup_cap_and_batches(settings, origin):
+    # 모두 탈락 → 5곳씩 2번, 요청당 10곳에서 멈춤
+    spots = _parks(origin)
+    d = FakeDetails({s.content_id: NO_PARK for s in spots})
+    with client(settings, origin, details=d, spots=spots) as c:
+        r = c.post("/api/v1/recommend", json=body(origin, require_parking=True))
+    assert r.json()["error"]["code"] == "CONDITION_NOT_MET"
+    assert len(d.calls) == settings.conditions.max_lookups == 10 and len(set(d.calls)) == 10
+
+
+def test_condition_stops_after_three_pass(settings, origin):
+    spots = _parks(origin)
+    d = FakeDetails()                                                    # 모두 주차 가능
+    with client(settings, origin, details=d, spots=spots) as c:
+        r = c.post("/api/v1/recommend", json=body(origin, require_parking=True, exclude_paid=True))
+    assert r.status_code == 200
+    assert len(d.calls) == 5 and len(d.fee_calls) == 5                   # 첫 5곳 병렬 조회에서 3곳 통과
+    # 탈락이 많으면 두 번째 묶음까지
+    d2 = FakeDetails({s.content_id: NO_PARK for s in spots[:12]})
+    d2.d.update({s.content_id: OK_PARK for s in spots[12:]})
+    with client(settings, origin, details=d2, spots=spots) as c:
+        c.post("/api/v1/recommend", json=body(origin, require_parking=True))
+    assert len(d2.calls) == 10
+
+
+def test_cached_failures_skipped_without_lookup(settings, origin):
+    spots = _parks(origin, 6)
+    bad = {s.content_id for s in spots[:4]}
+    d = FakeDetails({cid: NO_PARK for cid in bad}, cached=bad, fees={spots[4].content_id: "유료"},
+                    cached_fee={spots[4].content_id})
+    with client(settings, origin, details=d, spots=spots) as c:
+        j = c.post("/api/v1/recommend", json=body(origin, require_parking=True, exclude_paid=True)).json()
+    assert j["reveal"]["content_id"] == spots[5].content_id
+    assert not (set(d.calls) & (bad | {spots[4].content_id}))            # 캐시로 탈락 확인된 곳은 조회 안 함
+    with client(settings, origin, details=d, spots=spots[:5]) as c:      # 남은 곳이 없으면 CONDITION_NOT_MET
+        r = c.post("/api/v1/recommend", json=body(origin, require_parking=True, exclude_paid=True))
+    assert r.json()["error"]["code"] == "CONDITION_NOT_MET"
+
+
+def test_conditions_with_retry_context(settings, origin):
+    spots = _retry_spots(origin) + [make_spot("near2", "작은쉼터", east_km=2.5, lcls3="VE030400", base=origin)]
+    d = FakeDetails({"near": NO_PARK, "near2": OK_PARK})
+    rc = {"previous_content_ids": ["p1"], "observed_eta_seconds": 1248}   # 속도 0.5배 → 약 2.9km 이내
+    with client(settings, origin, details=d, spots=spots) as c:
+        j = c.post("/api/v1/recommend", json=body(origin, retry_context=rc, require_parking=True)).json()
+    assert j["reveal"]["content_id"] == "near2" and j["hint"]["parking"] == "가능"
+
+
+def test_keywords_estimate_with_conditions(settings, origin):
+    views = [make_spot(f"v{i}", f"높은곳{i}", north_km=4 + i * 0.3, lcls3="VE010200", base=origin) for i in range(3)]
+    q = {"lat": origin[0], "lng": origin[1], "drive_minutes": 15}
+    def view(c, **cond):
+        return {k["id"]: k for k in c.get("/api/v1/keywords", params={**q, **cond}).json()["keywords"]}["view"]
+    with client(settings, origin, spots=views) as c:
+        assert view(c)["enabled"]
+        off = view(c, require_parking="true")                            # 3 × 0.7 = 2.1 < 3
+        assert not off["enabled"] and off["reason"] == "조건에 맞는 곳이 적어요"
+        assert not view(c, exclude_paid="true")["enabled"]               # 3 × 0.95 = 2.85 < 3
+    ids = {s.content_id for s in views}
+    known = FakeDetails({cid: OK_PARK for cid in ids}, cached=ids)       # 캐시로 '가능' 확인 → 1씩
+    with client(settings, origin, spots=views, details=known) as c:
+        assert view(c, require_parking="true")["enabled"]
+    bad = FakeDetails({"v0": NO_PARK, "v1": OK_PARK, "v2": OK_PARK}, cached=ids)
+    with client(settings, origin, spots=views, details=bad) as c:
+        assert not view(c, require_parking="true")["enabled"]            # 1곳 탈락 확인 → 2
+    four = views + [make_spot("v3", "높은곳3", north_km=5.0, lcls3="VE010200", base=origin)]
+    with client(settings, origin, spots=four) as c:
+        assert view(c, exclude_paid="true")["enabled"]                   # 4 × 0.95 = 3.8
+        assert view(c, require_parking="true", exclude_paid="true")["enabled"] is False   # 4 × 0.665
+
+
+def test_condition_fields_validation(settings):
+    o = (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"])
+    with client(settings, o) as c:
+        r = c.post("/api/v1/recommend", json=body(o, require_parking="abc"))
+        k = c.get("/api/v1/keywords", params={"lat": o[0], "lng": o[1], "drive_minutes": 15, "exclude_paid": "abc"})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "INVALID_REQUEST"
+    assert k.status_code == 400 and "abc" not in k.text
+
+
+def test_passes_rules():
+    from app.recommend import Conditions, passes
+    both = Conditions(True, True)
+    assert passes(both, "가능", "무료") and passes(both, "가능", None)
+    assert not passes(both, "불가", "무료") and not passes(both, None, "무료") and not passes(both, "가능", "유료")
+    assert passes(Conditions(), None, "유료")

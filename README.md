@@ -11,7 +11,7 @@
 | `app/` | 서버 코드 (API, 추천 흐름, 관광 API 클라이언트, 점수·일몰·가명·캐시) |
 | `config/` | 튜닝 값: `settings.yaml`(반경·점수·시간 구간·섬 규칙), `keywords.yaml`(키워드↔관광 분류), `alias_pool.yaml`(검수된 가명 100개), `alias.yaml`(가명 금지어 규칙) |
 | `tests/` | 단위 테스트(mock), 실제 API 통합 테스트(`-m integration`), 테스트 데이터(출발 좌표 7곳 등) |
-| `scripts/` | `demo_call.sh`(시연 호출), `check_locations.py`(7곳 점검), `generate_alias_pool.py`(가명 후보 일회성 생성, Ollama 필요) |
+| `scripts/` | `demo_call.sh`(시연 호출), `check_locations.py`(7곳 점검), `warmup.py`(시연 전 캐시 예열), `measure_speed.py`(속도 측정), `generate_alias_pool.py`(가명 후보 일회성 생성, Ollama 필요) |
 | `docs/` | `API_FOR_APP.md`(앱 팀용 API 명세), `BlindNames.kt`(앱용 가명 100개), `TEAM_HANDOFF.md`(팀원별 연동), `GIT_GUIDE.md`(저장소 사용법), `EVALUATION.md`(평가 결과) |
 
 ## 빠른 시작
@@ -49,7 +49,7 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 | 메서드 | 경로 | 용도 |
 |---|---|---|
 | GET | `/api/v1/keywords?lat=&lng=&drive_minutes=` | 키워드 9개의 활성 여부와 비활성 사유 (예: `"지금 시간으론 멀어요"`, `"일몰은 17:25이에요"`) |
-| POST | `/api/v1/recommend` | 장소 1곳 추천: 목적지 좌표, 힌트(주차·요금·도착 시 운영), 도착 후 공개 정보, 직선거리·서버 추정 운전시간 (+ 호환용 가명). `retry_context` 로 실제 ETA 를 보내면 그 요청만 속도를 보정해 재추천 |
+| POST | `/api/v1/recommend` | 장소 1곳 추천: 목적지 좌표, 힌트(주차·요금·도착 시 운영), 도착 후 공개 정보, 직선거리·서버 추정 운전시간 (+ 호환용 가명). `retry_context` 로 실제 ETA 를 보내면 그 요청만 속도를 보정해 재추천. `require_parking`·`exclude_paid` 조건 |
 | GET | `/healthz` | 관광지 인덱스 적재 상태 |
 
 ```json
@@ -59,7 +59,8 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 
 - 키워드 id: `sea` 바다, `water` 호수·강, `forest` 숲, `walk` 산책, `view` 전망, `quiet` 고즈넉, `sunrise` 일출, `sunset` 노을, `night` 야경 (0~3개).
 - 에러는 `{"error": {"code", "message", "request_id"}}` 형식입니다.
-  코드: `INVALID_REQUEST`, `INVALID_LOCATION`, `INVALID_KEYWORD`, `KEYWORD_UNAVAILABLE`, `NO_CANDIDATES`, `UPSTREAM_TOUR_API_ERROR`, `INTERNAL_ERROR`.
+  코드: `INVALID_REQUEST`, `INVALID_LOCATION`, `INVALID_KEYWORD`, `KEYWORD_UNAVAILABLE`, `NO_CANDIDATES`, `CONDITION_NOT_MET`, `UPSTREAM_TOUR_API_ERROR`, `INTERNAL_ERROR`.
+- 조건: `"require_parking": true` 면 주차 '가능'으로 확인된 곳만, `"exclude_paid": true` 면 '유료' 제외(무료·정보 없음 포함). 점수 상위부터 5곳씩, 요청당 최대 10곳 상세조회. 못 찾으면 `CONDITION_NOT_MET`(404). `/keywords` 도 같은 쿼리를 받아 캐시 기반 추정으로 칩을 끈다.
 - 자동 재추천: 앱이 `requestTrip` 실제 ETA 가 설정 시간을 넘으면 `"retry_context": {"previous_content_ids": [...], "observed_eta_seconds": 1530}` 을 담아 다시 요청한다(최대 3회). 보정값은 저장하지 않는다.
 - 서버는 사용자 좌표를 저장·로그하지 않고, 관광 API 로도 보내지 않습니다.
 
@@ -77,6 +78,23 @@ python scripts/generate_alias_pool.py --model qwen2.5:7b   # 가명 후보 생�
 ```
 
 `reports/` 와 `data/` 는 실행 시 자동으로 만들어지며 git 에서 제외됩니다.
+
+## 시연 전 캐시 예열 (`scripts/warmup.py`)
+
+시연 출발지 주변의 상세·요금 정보를 미리 받아 두면 시연 중 관광 API 호출과 대기 시간이 거의 없어집니다.
+출발지 × 운전시간 × 키워드(없음 + 9개) 조합마다 1차 점수 상위 10곳을 조회합니다(곳당 최대 3회, 이미 캐시된 곳은 건너뜀).
+캐시에 소개글이 있는 곳은 1차 점수 가산을 받으므로 예열한 곳이 시연 때 먼저 뽑힙니다.
+
+```bash
+# 1) 호출 없이 대상 수·예상 호출 수 확인
+python scripts/warmup.py --origin 37.4979,127.0276 --drives 30,60 --max-calls 300 --dry-run
+# 2) 실제 예열. --max-calls 는 필수 (하루 한도 1,000회 - 그날 이미 쓴 양)
+python scripts/warmup.py --origin 37.4979,127.0276 --drives 30,60 --max-calls 300
+```
+
+- 출발지 1곳 × 운전시간 1개에 보통 300회 이하입니다. 상한에 닿으면 멈추고, 다음 날 같은 명령으로 이어서 실행하면 남은 곳만 받습니다.
+- 상세 캐시는 7일 유지되므로 **시연 1~2일 전**에 나눠 돌립니다. 시연 당일은 한도를 비워 둡니다.
+- `--origin` 은 여러 번 줄 수 있고, `--keywords none,forest,walk` 로 조합을 줄일 수 있습니다.
 
 ## 평가 결과
 

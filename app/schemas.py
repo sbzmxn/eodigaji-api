@@ -24,6 +24,8 @@ class RecommendRequest(BaseModel):
     keyword_ids: list[str] = Field(default_factory=list, max_length=3)
     exclude_content_ids: list[str] = Field(default_factory=list, max_length=200)
     retry_context: Optional[RetryContext] = None
+    require_parking: bool = Field(False, description="true 면 주차 '가능'으로 확인된 곳만 (불가·정보 없음 제외)")
+    exclude_paid: bool = Field(False, description="true 면 기본 입장료·이용료 '유료'인 곳 제외 (무료·정보 없음 포함)")
 
 
 class Destination(BaseModel):
@@ -89,6 +91,7 @@ ERROR_CODES = {
     "INVALID_KEYWORD": 400,
     "KEYWORD_UNAVAILABLE": 400,
     "NO_CANDIDATES": 404,
+    "CONDITION_NOT_MET": 404,
     "UPSTREAM_TOUR_API_ERROR": 502,
     "INTERNAL_ERROR": 500,
 }

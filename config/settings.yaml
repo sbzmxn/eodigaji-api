@@ -54,6 +54,15 @@ candidates:
   # 교통시설, 교육시설, 산업관광, 동상 (신분류 코드 접두어)
   exclude_lcls_prefixes: [VE11, VE09, EX06, VE010500]
 
+# 추천 조건 require_parking(주차 '가능'만) / exclude_paid('유료' 제외, 무료·정보 없음은 포함)
+# 점수 상위부터 batch_size 곳씩 병렬 상세조회, 통과 finalists 곳이면 멈춤, 요청당 max_lookups 곳까지.
+# 캐시에 불가·정보 없음(주차)·유료로 확인된 곳은 조회 없이 제외한다.
+conditions:
+  max_lookups: 10
+  batch_size: 5
+  parking_pass_rate: 0.7     # /keywords 추정용 (2026-11-13 실측 73~79%)
+  fee_pass_rate: 0.95        # /keywords 추정용 (실측 유료 2~4%)
+
 scoring:
   kw_class: 1.0            # 신분류 일치
   kw_text: 0.5             # 제목·소개글 단어 일치

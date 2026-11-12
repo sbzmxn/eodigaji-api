@@ -64,6 +64,14 @@ class CandidateCfg(BaseModel):
     exclude_lcls_prefixes: list[str] = Field(default_factory=list)
 
 
+class ConditionsCfg(BaseModel):
+    """추천 조건(require_parking, exclude_paid)."""
+    max_lookups: int = 10          # 조건을 켰을 때 요청당 상세조회 상한
+    batch_size: int = 5            # 한 번에 병렬로 조회할 곳 수
+    parking_pass_rate: float = 0.7 # /keywords 추정: 주차 정보가 캐시에 없을 때 '가능'일 확률
+    fee_pass_rate: float = 0.95    # /keywords 추정: 요금 정보가 캐시에 없을 때 '유료가 아닐' 확률
+
+
 class ScoringCfg(BaseModel):
     kw_class: float = 1.0
     kw_text: float = 0.5
@@ -159,6 +167,7 @@ class Settings(BaseModel):
     drive_minutes: DriveCfg = Field(default_factory=DriveCfg)
     retry: RetryCfg = Field(default_factory=RetryCfg)
     candidates: CandidateCfg = Field(default_factory=CandidateCfg)
+    conditions: ConditionsCfg = Field(default_factory=ConditionsCfg)
     scoring: ScoringCfg = Field(default_factory=ScoringCfg)
     time_windows: TimeWindowCfg = Field(default_factory=TimeWindowCfg)
     season_rules: list[SeasonRule] = Field(default_factory=list)
