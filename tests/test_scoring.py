@@ -58,3 +58,13 @@ def test_weighted_pick_seeded_and_weighted():
 def test_weighted_pick_empty():
     with pytest.raises(ValueError):
         weighted_pick([], [], random.Random(), 0.05)
+
+
+
+@pytest.mark.parametrize("f", [0.3, 0.5, 1.0, 1.7, 2.0])
+@pytest.mark.parametrize("m", [15, 30, 45, 120])
+def test_speed_factor_model_consistent(settings, f, m):
+    """재추천 보정: 반경 = radius_km(drive*f), 예상시간 = eta/f. 반경 끝 지점의 보정 시간은 drive 와 같다."""
+    r = radius_km(m * f, settings.radius)
+    if r > settings.radius.min_radius_km:
+        assert eta_minutes(r, settings.radius) / f == pytest.approx(m)

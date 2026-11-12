@@ -20,7 +20,7 @@ from .alias import AliasPool, build_region_words, build_type_words, build_unit_w
 from .audit import AuditSink, LogSink, RequestMeta
 from .cache import DiskCache
 from .config import Settings, get_settings
-from .recommend import ApiError, Recommender, new_request_id
+from .recommend import ApiError, Recommender, Retry, new_request_id
 from .schemas import ERROR_CODES, ErrorResponse, KeywordsResponse, RecommendRequest, RecommendResponse
 from .spots import DetailService, IndexManager
 from .tour_client import TourClient
@@ -178,8 +178,10 @@ def create_app(
         if extras:  # 정의 안 된 필드는 무시. 필드 '이름'만 남기고 값은 남기지 않는다
             log.warning("ignored fields rid=%s: %s", request.state.meta.request_id,
                         ",".join(e[:30] for e in extras[:5]))
+        rc = body.retry_context
+        retry = Retry(rc.previous_content_ids, rc.observed_eta_seconds) if rc else None
         out = await rec.recommend(body.latitude, body.longitude, body.drive_minutes,
-                                  body.keyword_ids, body.exclude_content_ids)
+                                  body.keyword_ids, body.exclude_content_ids, retry)
         meta: RequestMeta = request.state.meta
         meta.n_candidates = out.n_candidates
         meta.alias_source = out.alias_source

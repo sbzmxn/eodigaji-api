@@ -49,7 +49,7 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 | 메서드 | 경로 | 용도 |
 |---|---|---|
 | GET | `/api/v1/keywords?lat=&lng=&drive_minutes=` | 키워드 8개의 활성 여부와 비활성 사유 (예: `"지금 시간으론 멀어요"`, `"일몰은 17:25이에요"`) |
-| POST | `/api/v1/recommend` | 장소 1곳 추천: 목적지 좌표, 힌트(주차·요금·도착 시 운영), 도착 후 공개 정보 (+ 호환용 가명) |
+| POST | `/api/v1/recommend` | 장소 1곳 추천: 목적지 좌표, 힌트(주차·요금·도착 시 운영), 도착 후 공개 정보, 직선거리·서버 추정 운전시간 (+ 호환용 가명). `retry_context` 로 실제 ETA 를 보내면 그 요청만 속도를 보정해 재추천 |
 | GET | `/healthz` | 관광지 인덱스 적재 상태 |
 
 ```json
@@ -60,6 +60,7 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 - 키워드 id: `sea` 바다, `water` 호수·강, `forest` 숲, `walk` 산책, `view` 전망, `quiet` 고즈넉, `sunset` 노을, `night` 야경 (0~3개).
 - 에러는 `{"error": {"code", "message", "request_id"}}` 형식입니다.
   코드: `INVALID_REQUEST`, `INVALID_LOCATION`, `INVALID_KEYWORD`, `KEYWORD_UNAVAILABLE`, `NO_CANDIDATES`, `UPSTREAM_TOUR_API_ERROR`, `INTERNAL_ERROR`.
+- 자동 재추천: 앱이 `requestTrip` 실제 ETA 가 설정 시간을 넘으면 `"retry_context": {"previous_content_ids": [...], "observed_eta_seconds": 1530}` 을 담아 다시 요청한다(최대 3회). 보정값은 저장하지 않는다.
 - 서버는 사용자 좌표를 저장·로그하지 않고, 관광 API 로도 보내지 않습니다.
 
 요청·응답 전체 예시, Kotlin 데이터 클래스·Retrofit 인터페이스, 에러별 앱 문구, NaviHelper 주의사항은 **[docs/API_FOR_APP.md](docs/API_FOR_APP.md)** 에 있습니다.
@@ -71,6 +72,7 @@ FastAPI 자동 문서: 서버 실행 후 `/docs`.
 pytest                               # 단위 테스트 (네트워크·GPU 불필요). API 테스트는 출발 좌표 7곳 각각에서 실행
 pytest -m integration                # 실제 관광 API 통합 테스트 (.env 키 필요)
 python scripts/check_locations.py    # 7곳 × 15·30·60·120분 점검 → reports/locations_check.md
+python scripts/measure_speed.py      # /recommend 1·2·3회 연속 소요 시간(캐시 있음/없음) → reports/speed.md, 관광 API 약 370회
 python scripts/generate_alias_pool.py --model qwen2.5:7b   # 가명 후보 생성(일회성, Ollama 필요) → reports/
 ```
 

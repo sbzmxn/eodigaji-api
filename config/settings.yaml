@@ -39,6 +39,13 @@ radius:
 
 drive_minutes: {min: 15, max: 120}
 
+# 재추천(retry_context) 속도 보정. 배율 = 직전 후보의 서버 추정 운전시간 / 앱이 받은 실제 ETA.
+# 구간별 속도에 배율을 곱해 반경·거리 구간을 다시 계산한다. 요청 단위로만 쓰고 저장하지 않는다.
+retry:
+  min_speed_factor: 0.3        # 실제가 추정보다 3.3배 이상 느려도 0.3 으로 제한
+  max_speed_factor: 2.0
+  min_estimated_seconds: 120   # 직전 후보가 2분 거리 미만이면 보정하지 않음
+
 candidates:
   max_candidates: 20       # 1차 점수 상위 N개만 다음 단계로
   min_for_keyword: 3       # /keywords: 후보가 이보다 적으면 비활성

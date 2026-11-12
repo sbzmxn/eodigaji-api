@@ -44,6 +44,13 @@ class RadiusCfg(BaseModel):
     )
 
 
+class RetryCfg(BaseModel):
+    """재추천 속도 보정: 속도 배율 = 서버 추정 운전시간 / 실제 ETA (요청 단위, 저장하지 않음)."""
+    min_speed_factor: float = 0.3
+    max_speed_factor: float = 2.0
+    min_estimated_seconds: float = 120   # 직전 후보의 추정 운전시간이 이보다 짧으면 보정하지 않음 (잡음)
+
+
 class DriveCfg(BaseModel):
     min: int = 15
     max: int = 120
@@ -148,6 +155,7 @@ class Settings(BaseModel):
     cache: CacheCfg = Field(default_factory=CacheCfg)
     radius: RadiusCfg = Field(default_factory=RadiusCfg)
     drive_minutes: DriveCfg = Field(default_factory=DriveCfg)
+    retry: RetryCfg = Field(default_factory=RetryCfg)
     candidates: CandidateCfg = Field(default_factory=CandidateCfg)
     scoring: ScoringCfg = Field(default_factory=ScoringCfg)
     time_windows: TimeWindowCfg = Field(default_factory=TimeWindowCfg)

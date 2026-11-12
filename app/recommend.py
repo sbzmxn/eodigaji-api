@@ -17,8 +17,8 @@ from .keywords import (combined_keyword_score, is_excluded, keyword_score, landm
 from .schemas import ERROR_CODES
 from .scoring import (distance_score, eta_minutes, info_score, radius_km, season_bonus,
                       weighted_pick)
-from .spots import Detail, DetailService, IndexManager, Spot, closed_weekdays, normalize_parking, open_at, \
-    overview_short
+from .spots import Detail, DetailService, IndexManager, Spot, closed_weekdays, haversine_km, normalize_parking, \
+    open_at, overview_short
 from .tour_client import TourApiError
 
 
@@ -48,6 +48,13 @@ class Outcome:
     body: dict
     n_candidates: int = 0
     alias_source: Optional[str] = None
+    speed_factor: Optional[float] = None    # 재추천 보정 배율 (보정 안 했으면 None)
+
+
+@dataclass
+class Retry:
+    previous_content_ids: list[str]
+    observed_eta_seconds: Optional[int] = None
 
 
 class Recommender:
@@ -94,7 +101,8 @@ class Recommender:
             return None
         return landmass_of(min(close, key=lambda x: x[0])[1], self.s.landmasses)
 
-    def _base_pool(self, near, drive: int):
+    def _base_pool(self, near, drive: int, factor: float = 1.0):
+        """factor: 재추천 속도 배율. 예상 운전시간 = 기본 모델 시간 / factor."""
         prefixes = self.s.candidates.exclude_lcls_prefixes
         origin = self._origin_landmass(near)
         for spot, d in near:
@@ -102,7 +110,7 @@ class Recommender:
                 continue
             if landmass_of(spot, self.s.landmasses) != origin:
                 continue                            # 배를 타야 하는 곳
-            eta = eta_minutes(d, self.s.radius)
+            eta = eta_minutes(d, self.s.radius) / factor
             ds = distance_score(eta, drive, self.s.scoring)
             if ds is None:
                 continue
@@ -139,8 +147,25 @@ class Recommender:
             "_counts": counts,
         }
 
+    # ---- 재추천 속도 보정 -----------------------------------------------------
+    async def speed_factor(self, lat: float, lng: float, retry: Optional[Retry]) -> Optional[float]:
+        """직전 후보(previous_content_ids 마지막)의 직선거리로 서버가 추정한 운전시간 / 실제 ETA.
+        직전 후보를 인덱스에서 못 찾거나, 너무 가까워 추정이 불안정하면 None (보정 안 함)."""
+        if not retry or not retry.observed_eta_seconds or not retry.previous_content_ids:
+            return None
+        idx = await self.index.ensure_index()
+        prev = idx.by_id.get(retry.previous_content_ids[-1])
+        if prev is None:
+            return None
+        est_s = eta_minutes(haversine_km(lat, lng, prev.lat, prev.lng), self.s.radius) * 60
+        rc = self.s.retry
+        if est_s < rc.min_estimated_seconds:
+            return None
+        return min(rc.max_speed_factor, max(rc.min_speed_factor, est_s / retry.observed_eta_seconds))
+
     # ---- /recommend ---------------------------------------------------------
-    async def recommend(self, lat: float, lng: float, drive: int, kids: list[str], exclude: list[str]) -> Outcome:
+    async def recommend(self, lat: float, lng: float, drive: int, kids: list[str], exclude: list[str],
+                        retry: Optional[Retry] = None) -> Outcome:
         self._check_location(lat, lng)
         self._check_drive(drive)
         self._check_keywords(kids)
@@ -150,10 +175,16 @@ class Recommender:
         if kids and not active:
             raise ApiError("KEYWORD_UNAVAILABLE", "고른 키워드를 도착 예상 시각에는 쓸 수 없어요")
 
-        near = await self._near(lat, lng, radius_km(drive, self.s.radius))
-        excl = set(exclude)
+        try:
+            factor = await self.speed_factor(lat, lng, retry)
+        except TourApiError as e:
+            raise ApiError("UPSTREAM_TOUR_API_ERROR", "관광 정보 서버에서 목록을 가져오지 못했습니다") from e
+        # 속도 f배 = 같은 drive 분 동안 기본 모델로 drive*f 분 가는 거리. 직전 후보의 보정 시간 = 실제 ETA
+        f = factor or 1.0
+        near = await self._near(lat, lng, radius_km(drive * f, self.s.radius))
+        excl = set(exclude) | set(retry.previous_content_ids if retry else [])
         pool: list[Cand] = []
-        for spot, d, eta, ds in self._base_pool(near, drive):
+        for spot, d, eta, ds in self._base_pool(near, drive, f):
             if spot.content_id in excl:
                 continue
             cached = self.details.peek(spot)
@@ -197,8 +228,10 @@ class Recommender:
                 "matched_keywords": matched,
             },
             "alias_source": "pool",
+            "straight_km": round(chosen.dist_km, 2),
+            "estimated_drive_seconds": int(round(chosen.eta * 60)),
         }
-        return Outcome(body, len(pool), "pool")
+        return Outcome(body, len(pool), "pool", factor)
 
     async def _finalists(self, top: list[Cand], arrival: datetime, active: list[str]) -> list[Cand]:
         """상위 후보부터 상세조회해 finalists 개를 채운다.

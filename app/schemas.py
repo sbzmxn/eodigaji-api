@@ -6,6 +6,15 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class RetryContext(BaseModel):
+    """재추천: 직전 추천의 실제 ETA 로 이번 요청의 평균 속도를 보정한다 (저장하지 않음)."""
+    previous_content_ids: list[str] = Field(
+        default_factory=list, max_length=200,
+        description="이 세션에서 이미 나온 reveal.content_id (마지막 원소 = 직전 후보). 모두 제외된다")
+    observed_eta_seconds: Optional[int] = Field(
+        None, gt=0, le=6 * 3600, description="직전 후보까지 NaviHelper requestTrip 이 준 실제 ETA(초)")
+
+
 class RecommendRequest(BaseModel):
     model_config = ConfigDict(extra="allow")   # 정의 안 된 필드는 무시(경고 로그). available_minutes 만 거부
 
@@ -14,6 +23,7 @@ class RecommendRequest(BaseModel):
     drive_minutes: int = Field(description="목적지까지 편도 운전 시간(분), 15~120")
     keyword_ids: list[str] = Field(default_factory=list, max_length=3)
     exclude_content_ids: list[str] = Field(default_factory=list, max_length=200)
+    retry_context: Optional[RetryContext] = None
 
 
 class Destination(BaseModel):
@@ -44,6 +54,9 @@ class RecommendResponse(BaseModel):
     hint: Hint
     reveal: Reveal
     alias_source: str = Field(description='항상 "pool" (검수된 가명 목록)')
+    straight_km: float = Field(description="출발지→목적지 직선거리(km, 소수 둘째 자리)")
+    estimated_drive_seconds: int = Field(
+        description="서버 추정 편도 운전시간(초). retry_context 로 속도를 보정했으면 보정 속도 기준")
 
 
 class KeywordStatus(BaseModel):

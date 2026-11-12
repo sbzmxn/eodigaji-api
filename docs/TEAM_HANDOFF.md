@@ -19,7 +19,21 @@
    - 운전 시간 → 키워드 순서로 입력받습니다. 시간이 바뀌면 `/api/v1/keywords`를 다시 불러 칩 상태를 갱신하고, 꺼진 칩은 선택을 자동 해제합니다.
    - 꺼진 칩은 회색으로 그리고 `reason` 문구를 그대로 보여 줍니다.
    - 가명은 추천 결과·주행 중 화면에만 보여 줍니다. 한 줄로 표시합니다.
-   - 힌트 카드: `hint.parking`, `hint.fee`, `hint.open_now` 중 `null`인 항목은 숨깁니다.
+   - 힌트 카드 표시 규칙 (`null`도 아래 규칙으로 표시합니다)
+
+     | 서버 값 | 표시 문구 |
+     |---|---|
+     | `hint.parking == "가능"` | 주차 가능 |
+     | 그 외 (`"불가"`, `null`) | 주차 불가 또는 알 수 없음 |
+     | `hint.fee == "유료"` | 유료 체험 |
+     | 그 외 (`"무료"`, `null`) | 무료 체험 또는 알 수 없음 |
+
+     ```kotlin
+     fun parkingText(p: String?) = if (p == "가능") "주차 가능" else "주차 불가 또는 알 수 없음"
+     fun feeText(f: String?) = if (f == "유료") "유료 체험" else "무료 체험 또는 알 수 없음"
+     ```
+     `hint.open_now`는 `null`이면 숨깁니다.
+   - 로딩 화면: 자동 재추천(아래 'Pleos SDK·내비 연동') 때문에 최대 3번 추천을 받습니다. 전체 타임아웃은 25초로 두고, "가까운 곳을 다시 찾는 중…(2/3)"처럼 단계를 보여 주세요.
    - 언박싱 사진은 출처 "한국관광공사"를 표시하고, 자르거나(`centerCrop`) 글자를 덮지 않습니다(`fitCenter`만).
    - 도감 카드는 가명을 크게, 실제 장소명을 작게 보여 줍니다.
    - 주행 중(`CarUxRestrictions`)에는 입력 화면을 막고 "정차 후 선택해 주세요"를 보여 줍니다.
@@ -47,7 +61,36 @@ val routeInfo = RouteInfo(
 ```
 
 - 언박싱 조건: 도착 이벤트(또는 FusedLocation 근접 알림) **그리고** 주차(기어 P) 상태.
-- 저장소 관리자에게 알려 줄 것: ETA를 받는 함수·필드 이름과 단위, 도착 이벤트 이름, poiId·poiSubId에 넣은 값, 기어 P 속성 이름. 이걸 받으면 서버에 "실제 소요 시간 확인 후 목적지 재선정"을 붙입니다.
+- 저장소 관리자에게 알려 줄 것: 도착 이벤트 이름, poiId·poiSubId에 넣은 값, 기어 P 속성 이름, `requestTrip` 1회에 걸리는 시간(로딩 타임아웃 계산용).
+
+### 재추천 흐름 (실제 ETA 확인)
+
+서버의 운전시간은 직선거리로 추정한 값이라 실제와 다를 수 있습니다. 안내를 시작하기 전에 `requestTrip`으로 실제 ETA를 확인하고, 설정 시간을 넘으면 서버에 다시 요청합니다. 자세한 필드는 [`API_FOR_APP.md` 2-3](API_FOR_APP.md#2-3-자동-재추천-retry_context).
+
+1. `/api/v1/recommend` 호출 (첫 회는 `retry_context` 없이).
+2. 응답 `destination`으로 NaviHelper `requestTrip` → 실제 ETA(초).
+3. ETA ≤ `drive_minutes × 60` 이면 확정 → `requestRoute`로 안내 시작.
+4. 초과면 `retry_context = {previous_content_ids: 지금까지 나온 content_id 전부(마지막=직전 후보), observed_eta_seconds: 방금 ETA}`를 담아 1번으로. **추천은 최대 3회**.
+5. 3회 모두 초과하거나 재요청이 `NO_CANDIDATES`면 마지막으로 받은 결과로 안내합니다.
+
+```kotlin
+val previous = mutableListOf<String>()
+var observed: Int? = null
+var res: RecommendResponse? = null
+for (attempt in 1..3) {
+    val retry = if (previous.isEmpty()) null else RetryContext(previous.toList(), observed)
+    val r = api.recommend(baseRequest.copy(retryContext = retry)).body() ?: break
+    res = r
+    previous += r.reveal.contentId
+    val eta = requestTripEtaSeconds(r.destination)   // requestTrip 결과를 초로
+    observed = eta
+    if (eta <= driveMinutes * 60) break
+}
+// res 로 requestRoute (res 가 null 이면 에러 화면)
+```
+
+- `requestTrip`에도 `RouteInfo`를 넘긴다면 위와 같이 `poiName`은 가명, `address`는 빈 값으로 넘깁니다.
+- 앱 총 대기 시간 = 서버 시간 + `requestTrip` 시간 × 횟수. 서버는 3회 합계 p95 약 2.3초(상세 캐시 없을 때)입니다.
 
 ---
 
@@ -94,5 +137,5 @@ object RecentBlindNames {
 ### 서버 연결
 
 - 시연 주소는 ngrok 주소(팀에서 공유)입니다. Retrofit `baseUrl` 끝에 `/`를 붙입니다.
-- 타임아웃: `/keywords` 5초, `/recommend` 15초.
+- 타임아웃: `/keywords` 5초, `/recommend` 15초(1회). 재추천 포함 로딩 화면 전체 25초.
 - 에러는 `{"error": {"code", "message", "request_id"}}` 형식입니다. 코드별 문구는 `API_FOR_APP.md` 4장을 보세요.

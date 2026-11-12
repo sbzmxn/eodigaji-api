@@ -1,4 +1,5 @@
-"""실제 관광 API 통합 테스트 (호출 약 4회). 실행: pytest -m integration"""
+"""실제 관광 API 통합 테스트. 실행: pytest -m integration
+호출 수: 상세 캐시(data/cache)가 있으면 수십 회 이내. 끝나면 이번 실행의 관광 API 호출 수를 출력한다."""
 import asyncio
 import json
 from pathlib import Path
@@ -47,8 +48,10 @@ LOCATIONS = json.loads((Path(__file__).parent / "data" / "locations.json").read_
 def live_client(real_settings):
     from fastapi.testclient import TestClient
     from app.main import create_app
-    with TestClient(create_app(real_settings)) as c:
+    app = create_app(real_settings)
+    with TestClient(app) as c:
         yield c
+    print(f"\n[integration] 관광 API 호출 {app.state.index.tour.calls}회")
 
 
 @pytest.mark.parametrize("loc", LOCATIONS, ids=[l["name"] for l in LOCATIONS])
@@ -62,3 +65,27 @@ def test_live_keywords_and_recommend(live_client, loc):
     assert rr.status_code == 200, rr.text
     j = rr.json()
     assert j["blind_name"] and j["reveal"]["real_name"] not in j["blind_name"]
+
+
+@pytest.mark.parametrize("loc", LOCATIONS, ids=[l["name"] for l in LOCATIONS])
+def test_live_retry_with_slow_eta(live_client, loc):
+    """7곳 × 30분: 1차 추천 → '실제 ETA 가 서버 추정의 1.5배' 로 재추천.
+    직전 후보는 제외되고, 보정 속도(1/1.5) 기준 예상 시간이 30분 이내인 더 가까운 곳이 나와야 한다."""
+    from app.config import load_settings
+    from app.scoring import radius_km
+    s = load_settings(env_file=None)
+    base = {"latitude": loc["lat"], "longitude": loc["lng"], "drive_minutes": 30, "keyword_ids": []}
+    r1 = live_client.post("/api/v1/recommend", json=base)
+    assert r1.status_code == 200, r1.text
+    j1 = r1.json()
+    assert 0 < j1["estimated_drive_seconds"] <= 30 * 60 and j1["straight_km"] >= 0
+    observed = round(j1["estimated_drive_seconds"] * 1.5)
+    rc = {"previous_content_ids": [j1["reveal"]["content_id"]], "observed_eta_seconds": observed}
+    r2 = live_client.post("/api/v1/recommend", json={**base, "retry_context": rc})
+    assert r2.status_code == 200, r2.text
+    j2 = r2.json()
+    assert j2["reveal"]["content_id"] != j1["reveal"]["content_id"]
+    assert 0 < j2["estimated_drive_seconds"] <= 30 * 60
+    factor = j1["estimated_drive_seconds"] / observed
+    if j1["estimated_drive_seconds"] >= s.retry.min_estimated_seconds:
+        assert j2["straight_km"] <= radius_km(30 * factor, s.radius) + 0.01

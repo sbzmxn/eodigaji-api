@@ -6,7 +6,8 @@ from fastapi.testclient import TestClient
 
 from app.alias import AliasPoolError
 from app.main import create_app
-from app.spots import Detail
+from app.scoring import eta_minutes
+from app.spots import Detail, haversine_km
 from conftest import LOC_IDS, LOCATIONS, NOW, FakeDetails, FakeIndex, make_pool, make_spot
 
 
@@ -47,7 +48,8 @@ def test_recommend_contract(settings, origin):
         r = c.post("/api/v1/recommend", json=body(origin))
     assert r.status_code == 200, r.text
     j = r.json()
-    assert set(j) == {"request_id", "blind_name", "destination", "hint", "reveal", "alias_source"}
+    assert set(j) == {"request_id", "blind_name", "destination", "hint", "reveal", "alias_source",
+                      "straight_km", "estimated_drive_seconds"}
     assert set(j["hint"]) == {"parking", "fee", "open_now"}                       # theme 없음
     assert set(j["reveal"]) == {"content_id", "real_name", "address", "overview_short", "image_url",
                                 "theme", "matched_keywords"}
@@ -56,6 +58,10 @@ def test_recommend_contract(settings, origin):
     spot = {s.content_id: s for s in spots_around(origin)}[j["reveal"]["content_id"]]
     assert j["destination"] == {"lat": spot.lat, "lng": spot.lng}
     assert j["reveal"]["content_id"] not in {"x1", "far", "edge"}
+    assert j["straight_km"] == pytest.approx(haversine_km(*origin, spot.lat, spot.lng), abs=0.01)
+    assert j["estimated_drive_seconds"] == round(eta_minutes(haversine_km(*origin, spot.lat, spot.lng),
+                                                             settings.radius) * 60)
+    assert 0 < j["estimated_drive_seconds"] <= 15 * 60
 
 
 def test_keyword_filter_and_reveal(settings, origin):
@@ -235,3 +241,75 @@ def test_mainland_origin_excludes_island(settings):
     with client(settings, o, spots=spots) as c:
         r = c.post("/api/v1/recommend", json=body(o, keyword_ids=["sea"]))
     assert r.json()["reveal"]["content_id"] == "i2"              # 덕적면 제외, 영흥면(다리 연결)은 허용
+
+
+# ---- 재추천 (retry_context) ------------------------------------------------------
+def _retry_spots(o):
+    """drive_minutes=15. p1(4km) 추정 624초. near(2km)는 속도가 반으로 줄어도 15분 안."""
+    return spots_around(o) + [
+        make_spot("near", "가까운쉼터", north_km=2.0, lcls3="VE030400", base=o),
+        make_spot("w10", "먼저수지", north_km=-10.0, lcls3="NA020300", base=o),   # 기본 반경(5.77km) 밖
+    ]
+
+
+def test_retry_slow_eta_shrinks_radius(settings, origin):
+    # 실제 ETA 가 서버 추정(624초)의 2배 → 속도 0.5배 → 15분 안 = 직선 약 2.9km 이내만
+    rc = {"previous_content_ids": ["p1"], "observed_eta_seconds": 1248}
+    for seed in range(5):
+        with client(settings, origin, spots=_retry_spots(origin), seed=seed) as c:
+            j = c.post("/api/v1/recommend", json=body(origin, retry_context=rc)).json()
+        assert j["reveal"]["content_id"] == "near"
+        assert j["straight_km"] == pytest.approx(2.0, abs=0.01)
+        assert j["estimated_drive_seconds"] == pytest.approx(2.0 * 1.3 / 30 * 3600 * 2, abs=2)   # 5.2분 × 2
+
+
+def test_retry_fast_eta_widens_radius(settings, origin):
+    # 실제 ETA 가 추정보다 훨씬 짧음 → 배율 상한 2.0 → 10km 저수지가 15분 안으로 들어온다
+    rc = {"previous_content_ids": ["w1", "p1"], "observed_eta_seconds": 200}
+    with client(settings, origin, spots=_retry_spots(origin)) as c:
+        j = c.post("/api/v1/recommend", json=body(origin, keyword_ids=["water"], retry_context=rc)).json()
+        no_retry = c.post("/api/v1/recommend", json=body(origin, keyword_ids=["water"],
+                                                         exclude_content_ids=["w1", "p1"]))
+    assert j["reveal"]["content_id"] == "w10"
+    assert j["estimated_drive_seconds"] == pytest.approx(10 * 1.3 / 60 * 3600, abs=2)        # 26분 / 2
+    assert no_retry.status_code == 404                                                     # 보정 없으면 반경 밖
+
+
+def test_retry_excludes_previous_ids_and_is_not_stored(settings, origin):
+    rc = {"previous_content_ids": ["p1", "p2", "p3", "v1"], "observed_eta_seconds": 600}
+    with client(settings, origin) as c:
+        j = c.post("/api/v1/recommend", json=body(origin, retry_context=rc)).json()
+        assert j["reveal"]["content_id"] == "w1"
+        assert c.app.state.recommender.s.radius.speed_segments[0].kmh == 30   # 설정은 그대로
+        again = c.post("/api/v1/recommend", json=body(origin)).json()     # 다음 요청은 보정 없이
+    assert again["estimated_drive_seconds"] == pytest.approx(
+        eta_minutes(again["straight_km"], settings.radius) * 60, abs=2)
+
+
+def test_speed_factor_rules(settings, origin):
+    import asyncio
+    from app.recommend import Retry
+    with client(settings, origin, spots=_retry_spots(origin)) as c:
+        rec = c.app.state.recommender
+        f = lambda r: asyncio.run(rec.speed_factor(*origin, r))
+        assert f(None) is None
+        assert f(Retry(["p1"], None)) is None                        # ETA 없으면 제외만
+        assert f(Retry(["unknown"], 600)) is None                    # 인덱스에 없는 후보
+        assert f(Retry(["p1"], 624)) == pytest.approx(1.0, abs=0.01)
+        assert f(Retry(["p1"], 1248)) == pytest.approx(0.5, abs=0.01)
+        assert f(Retry(["p1"], 100000)) == settings.retry.min_speed_factor
+        assert f(Retry(["p1"], 10)) == settings.retry.max_speed_factor
+        settings.retry.min_estimated_seconds = 700                   # p1(624초)은 너무 가까워 보정 안 함
+        assert f(Retry(["p1"], 1248)) is None
+
+
+@pytest.mark.parametrize("rc", [{"previous_content_ids": ["p1"], "observed_eta_seconds": 0},
+                                {"previous_content_ids": ["p1"], "observed_eta_seconds": -5},
+                                {"previous_content_ids": ["p1"], "observed_eta_seconds": "abc"},
+                                {"previous_content_ids": ["x"] * 201}])
+def test_retry_context_validation(settings, rc):
+    o = (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"])
+    with client(settings, o) as c:
+        r = c.post("/api/v1/recommend", json=body(o, retry_context=rc))
+    e = r.json()["error"]
+    assert r.status_code == 400 and e["code"] == "INVALID_REQUEST" and "abc" not in e["message"]
