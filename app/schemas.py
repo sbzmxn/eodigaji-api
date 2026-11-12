@@ -78,7 +78,8 @@ class EtaCheckResponse(BaseModel):
     decision: Literal["accept", "retry", "fallback"]
     attempt: int = Field(description="안내할 후보(accept·fallback) 또는 새 추천(retry)이 몇 번째 추천인지")
     max_attempts: int
-    reason: Literal["within_limit", "over_limit", "max_attempts", "no_candidates", "condition_not_met"]
+    reason: Literal["within_limit", "over_limit", "max_attempts", "no_candidates", "condition_not_met",
+                    "keyword_unavailable", "upstream_error", "internal_error"]
     route_content_id: Optional[str] = Field(None, description="accept·fallback 일 때 안내할 content_id")
     recommendation: Optional[RecommendResponse] = Field(None, description="retry 일 때만 새 추천")
 

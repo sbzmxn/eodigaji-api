@@ -616,3 +616,67 @@ def test_eta_check_log_has_eta_but_no_coordinates(settings, caplog):
     line = next(m for m in logs.splitlines() if m.startswith("eta-check"))
     assert "content_id=edge" in line and "eta_s=1000" in line and "decision=retry" in line
     assert str(o[0]) not in logs and str(o[1]) not in logs and f"{o[0]:.3f}" not in logs
+
+
+# ---- eta-check: 재추천 실패는 fallback (INVALID_* 만 에러) ---------------------------------
+class BrokenIndex(FakeIndex):
+    """목록 조회가 관광 API 장애로 실패하는 인덱스 (재추천 단계에서만 near 를 부른다)."""
+    async def near(self, lat, lng, r):
+        from app.tour_client import TourApiError
+        raise TourApiError("down")
+
+
+class CrashingDetails(FakeDetails):
+    async def get(self, spot):
+        raise RuntimeError("boom")
+
+
+def _eta_app(settings, o, index=None, details=None):
+    app = create_app(settings, index=index or FakeIndex(spots_around(o)), details=details or FakeDetails(),
+                     alias=make_pool(settings), now_fn=lambda: NOW, rng=random.Random(1), load_on_startup=False)
+    return TestClient(app)
+
+
+@pytest.mark.parametrize("case,reason,code", [
+    ("keyword", "keyword_unavailable", "KEYWORD_UNAVAILABLE"),      # 14:15 도착인데 노을만 고름
+    ("upstream", "upstream_error", "UPSTREAM_TOUR_API_ERROR"),
+    ("internal", "internal_error", "INTERNAL_ERROR"),
+])
+def test_eta_check_retry_errors_become_fallback(settings, caplog, case, reason, code):
+    o = (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"])
+    caplog.set_level(logging.INFO)
+    kw = {"keyword": dict(), "upstream": dict(index=BrokenIndex(spots_around(o))),
+          "internal": dict(details=CrashingDetails())}[case]
+    over = {"keyword_ids": ["sunset"]} if case == "keyword" else {}
+    with _eta_app(settings, o, **kw) as c:
+        r = c.post("/api/v1/eta-check", json=eta(o, "edge", 1000, ["p1", "edge"], **over))
+        ok = c.post("/api/v1/eta-check", json=eta(o, "edge", 800, ["p1", "edge"], **over))   # 수락은 영향 없음
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert (j["decision"], j["reason"], j["attempt"], j["route_content_id"], j["recommendation"]) == \
+        ("fallback", reason, 2, "edge", None)
+    assert ok.json()["decision"] == "accept"
+    logs = "\n".join(x.getMessage() for x in caplog.records)
+    line = next(m for m in logs.splitlines() if m.startswith("eta-check") and "decision=fallback" in m)
+    assert f"error={code}" in line and f"reason={reason}" in line           # 원래 에러 코드를 남긴다
+    assert str(o[0]) not in logs and str(o[1]) not in logs                   # 좌표는 남기지 않는다
+
+
+def test_eta_check_invalid_from_retry_stays_error(settings, monkeypatch):
+    """재추천 단계에서 INVALID_* 가 나오면 fallback 으로 숨기지 않고 에러로 돌려준다."""
+    from app.recommend import ApiError
+    o = (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"])
+    with _eta_app(settings, o) as c:
+        async def bad(*a, **k):
+            raise ApiError("INVALID_REQUEST", "잘못된 요청")
+        monkeypatch.setattr(c.app.state.recommender, "recommend", bad)
+        r = c.post("/api/v1/eta-check", json=eta(o, "edge", 1000, ["edge"]))
+    assert r.status_code == 400 and r.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_eta_check_fallback_reasons_cover_retry_errors():
+    from app.recommend import RETRY_FALLBACK_REASONS
+    from app.schemas import ERROR_CODES, EtaCheckResponse
+    allowed = set(EtaCheckResponse.model_fields["reason"].annotation.__args__)
+    assert set(RETRY_FALLBACK_REASONS.values()) <= allowed
+    assert {c for c in ERROR_CODES if not c.startswith("INVALID_")} == set(RETRY_FALLBACK_REASONS)

@@ -78,7 +78,10 @@ val routeInfo = RouteInfo(
 4. `decision`
    - `retry`: 같이 온 `recommendation`이 다음 후보입니다. 2번으로 돌아갑니다. 로딩 화면에 `attempt`/`max_attempts`를 보여 줍니다.
    - `accept`·`fallback`: `route_content_id`의 추천으로 `requestRoute` 안내를 시작합니다(앱이 들고 있는 추천 중에서 찾습니다).
-5. 전체 **12초 제한은 앱이 겁니다.** 넘거나 `eta-check`가 에러면 마지막으로 받은 추천으로 안내합니다.
+5. 전체 **12초 제한은 앱이 겁니다.** 넘으면 마지막으로 받은 추천으로 안내합니다.
+6. 재추천이 실패하는 경우(후보 없음, 관광 API 장애, 서버 오류 등)는 서버가 `fallback`으로 돌려주므로 앱이 따로 처리하지 않습니다. 앱이 처리할 것은 두 가지뿐입니다.
+   - `INVALID_*` 에러(400): 앱 버그입니다. 로그를 남기고 지금 후보로 안내합니다.
+   - 네트워크 실패(연결 실패·타임아웃): 지금 후보로 안내합니다.
 
 ```kotlin
 // 앱은 ETA 비교·횟수 세기를 하지 않는다. decision 만 따른다.
@@ -93,7 +96,7 @@ withTimeoutOrNull(12_000) {                               // 전체 제한 12초
         val c = current!!
         val eta = requestTripEtaSeconds(c.destination)   // NaviHelper requestTrip, 초
         val res = api.etaCheck(baseRequest.toEtaCheck(c.reveal.contentId, eta, seen.keys.toList()))
-            .body() ?: break                              // 에러 → 지금 후보로 안내
+            .body() ?: break                              // INVALID_*(앱 버그, 로그) → 지금 후보로 안내
         if (res.decision == "retry") {
             val next = res.recommendation!!
             seen[next.reveal.contentId] = next
@@ -105,6 +108,7 @@ withTimeoutOrNull(12_000) {                               // 전체 제한 12초
         }
     }
 }
+// 네트워크 실패(IOException)는 runCatching 등으로 잡아 break 와 같이 처리 → 지금 후보로 안내
 // current 로 requestRoute (12초를 넘겨도 마지막으로 받은 추천). null 이면 에러 화면.
 ```
 

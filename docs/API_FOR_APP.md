@@ -199,10 +199,14 @@ curl "$BASE/healthz"
 | 넘음, 이미 3번째 후보 | `fallback` | `max_attempts` | `content_id` | `null` |
 | 넘음, 재추천할 곳이 없음 | `fallback` | `no_candidates` | `content_id` | `null` |
 | 넘음, 조건 스위치에 맞는 곳이 없음 | `fallback` | `condition_not_met` | `content_id` | `null` |
+| 넘음, 고른 키워드를 이제 쓸 수 없음(예: 노을 시간이 지남) | `fallback` | `keyword_unavailable` | `content_id` | `null` |
+| 넘음, 재추천 중 관광 API 장애 | `fallback` | `upstream_error` | `content_id` | `null` |
+| 넘음, 재추천 중 서버 내부 오류 | `fallback` | `internal_error` | `content_id` | `null` |
 
 - 재추천은 `/recommend` 의 `retry_context` 경로를 서버 안에서 그대로 쓴다: 방금 후보의 실제 ETA 로 속도를 보정하고, `previous_content_ids`·`exclude_content_ids` 를 모두 빼고, 조건 스위치를 그대로 적용한다.
 - `attempt` = 안내할 후보(`accept`·`fallback`) 또는 새 추천(`retry`)이 몇 번째 추천인지. 로딩 화면의 "(2/3)" 표시에 그대로 쓴다.
-- `NO_CANDIDATES`·`CONDITION_NOT_MET` 은 에러가 아니라 `fallback` 으로 온다. 그 밖의 에러(400 입력 오류, 502 관광 API 장애 등)는 `/recommend` 와 같은 에러 형식이다. 이때 앱은 방금 후보로 안내한다.
+- 재추천이 실패해도(후보 없음, 조건 불충족, 키워드 시간 지남, 관광 API 장애, 내부 오류) 에러가 아니라 `fallback` 200 으로 온다. 서버 로그에는 원래 에러 코드가 남는다.
+- **에러로 오는 것은 요청 검증 오류(`INVALID_REQUEST`·`INVALID_LOCATION`·`INVALID_KEYWORD`, 400)뿐이다.** 앱 버그이므로 로그를 남기고 방금 후보로 안내한다. 그 밖에 앱이 따로 처리할 것은 네트워크 실패(연결 실패·타임아웃)뿐이다.
 - 입력 오류(`INVALID_REQUEST`): `content_id` 가 `previous_content_ids` 의 마지막이 아님, `observed_eta_seconds` ≤ 0, 필드 누락. 위치·운전시간·키워드 검증은 `/recommend` 와 같다(`accept` 일 때도 검사).
 - 서버 로그에는 request_id, content_id, ETA, 판단만 남고 좌표는 남지 않는다.
 
@@ -419,7 +423,7 @@ data class EtaCheckResponse(
     @SerializedName("decision") val decision: String,          // "accept" | "retry" | "fallback"
     @SerializedName("attempt") val attempt: Int,               // 1~3
     @SerializedName("max_attempts") val maxAttempts: Int,
-    @SerializedName("reason") val reason: String,              // within_limit | over_limit | max_attempts | no_candidates | condition_not_met
+    @SerializedName("reason") val reason: String,              // within_limit | over_limit | max_attempts | no_candidates | condition_not_met | keyword_unavailable | upstream_error | internal_error (표시용 아님)
     @SerializedName("route_content_id") val routeContentId: String?,   // accept·fallback
     @SerializedName("recommendation") val recommendation: RecommendResponse?,  // retry
 )

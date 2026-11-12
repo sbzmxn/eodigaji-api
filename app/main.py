@@ -202,14 +202,15 @@ def create_app(
                                   body.exclude_content_ids, Conditions(body.require_parking, body.exclude_paid),
                                   body.content_id, body.observed_eta_seconds, body.previous_content_ids)
         out = res.pop("recommendation")
+        err = res.pop("_error_code")
         if out is not None:
             meta.n_candidates = out.n_candidates
             meta.alias_source = out.alias_source
         # ETA·content_id·판단만 남긴다 (좌표는 남기지 않음)
-        log.info("eta-check rid=%s content_id=%s eta_s=%d limit_s=%d attempt=%d decision=%s reason=%s next=%s",
-                 meta.request_id, body.content_id[:20], body.observed_eta_seconds, body.drive_minutes * 60,
-                 res["attempt"], res["decision"], res["reason"],
-                 out.body["reveal"]["content_id"] if out else "-")
+        log.info("eta-check rid=%s content_id=%s eta_s=%d limit_s=%d attempt=%d decision=%s reason=%s next=%s "
+                 "error=%s", meta.request_id, body.content_id[:20], body.observed_eta_seconds,
+                 body.drive_minutes * 60, res["attempt"], res["decision"], res["reason"],
+                 out.body["reveal"]["content_id"] if out else "-", err or "-")
         return {"request_id": meta.request_id, **res,
                 "recommendation": {"request_id": meta.request_id, **out.body} if out else None}
 

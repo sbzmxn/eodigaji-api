@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import uuid
 from dataclasses import dataclass
@@ -20,6 +21,18 @@ from .scoring import (distance_score, eta_minutes, info_score, radius_km, season
 from .spots import Detail, DetailService, IndexManager, Spot, closed_weekdays, haversine_km, normalize_parking, \
     open_at, overview_short
 from .tour_client import TourApiError
+
+
+log = logging.getLogger("eodigaji")
+
+# eta-check 재추천 실패 → fallback reason
+RETRY_FALLBACK_REASONS = {
+    "NO_CANDIDATES": "no_candidates",
+    "CONDITION_NOT_MET": "condition_not_met",
+    "KEYWORD_UNAVAILABLE": "keyword_unavailable",
+    "UPSTREAM_TOUR_API_ERROR": "upstream_error",
+    "INTERNAL_ERROR": "internal_error",
+}
 
 
 class ApiError(Exception):
@@ -248,22 +261,26 @@ class Recommender:
         ec = self.s.eta_check
         n = len(previous)
 
-        def result(decision: str, reason: str, attempt: int, outcome: Optional[Outcome] = None) -> dict:
+        def result(decision: str, reason: str, attempt: int, outcome: Optional[Outcome] = None,
+                   error_code: Optional[str] = None) -> dict:
             return {"decision": decision, "attempt": attempt, "max_attempts": ec.max_attempts, "reason": reason,
-                    "route_content_id": None if outcome else content_id, "recommendation": outcome}
+                    "route_content_id": None if outcome else content_id, "recommendation": outcome,
+                    "_error_code": error_code}
 
         if observed_s <= drive * 60 + ec.tolerance_seconds:
             return result("accept", "within_limit", n)
         if n >= ec.max_attempts:
             return result("fallback", "max_attempts", n)
+        # 재추천이 실패하면 에러 대신 방금 후보로 안내(fallback). 요청 자체가 잘못된 INVALID_* 만 에러로 둔다
         try:
             out = await self.recommend(lat, lng, drive, kids, exclude, Retry(previous, observed_s), cond)
         except ApiError as e:
-            if e.code == "NO_CANDIDATES":
-                return result("fallback", "no_candidates", n)
-            if e.code == "CONDITION_NOT_MET":
-                return result("fallback", "condition_not_met", n)
-            raise
+            if e.code.startswith("INVALID_") or e.code not in RETRY_FALLBACK_REASONS:
+                raise
+            return result("fallback", RETRY_FALLBACK_REASONS[e.code], n, error_code=e.code)
+        except Exception as e:  # noqa: BLE001  예상 못 한 내부 오류도 안내는 이어간다
+            log.error("eta-check retry failed: %s", type(e).__name__)
+            return result("fallback", "internal_error", n, error_code="INTERNAL_ERROR")
         return result("retry", "over_limit", n + 1, out)
 
     # ---- /recommend ---------------------------------------------------------
