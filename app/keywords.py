@@ -1,8 +1,8 @@
-"""힐링 키워드 매칭과 노을·야경 시간 판정.
+"""힐링 키워드 매칭과 일출·노을·야경 시간 판정.
 
 점수 규칙 (config/keywords.yaml, config/settings.yaml scoring):
 - 일반 키워드: 신분류 일치 kw_class(1.0) / 제목·소개글 단어 일치 kw_text(0.5)
-- 노을·야경: base 키워드의 '분류' 일치가 필수(time_base 0.5), text 일치 시 time_text(0.5) 가산.
+- 일출·노을·야경: base 키워드의 '분류' 일치가 필수(time_base 0.5), text 일치 시 time_text(0.5) 가산.
   소개글은 상세 캐시가 있을 때만 쓰인다 (overview 인자).
 """
 from __future__ import annotations
@@ -99,9 +99,19 @@ def _hhmm(dt: datetime) -> str:
     return dt.strftime("%H:%M")
 
 
-def time_status(kw: KeywordDef, arrival: datetime, sunset_dt: Optional[datetime], tw: TimeWindowCfg) -> TimeStatus:
+def time_status(kw: KeywordDef, arrival: datetime, sunset_dt: Optional[datetime], tw: TimeWindowCfg,
+                sunrise_dt: Optional[datetime] = None) -> TimeStatus:
+    """sunset_dt·sunrise_dt 는 도착 날짜 기준."""
     if not kw.time_window:
         return TimeStatus(True)
+    if kw.time_window == "sunrise":
+        if sunrise_dt is None:
+            return TimeStatus(False, "일출 시각을 계산할 수 없어요")
+        lo = sunrise_dt - timedelta(minutes=tw.sunrise_before_min)
+        hi = sunrise_dt + timedelta(minutes=tw.sunrise_after_min)
+        if lo <= arrival <= hi:
+            return TimeStatus(True)
+        return TimeStatus(False, f"일출은 {_hhmm(sunrise_dt)}이에요")
     if sunset_dt is None:
         return TimeStatus(False, "일몰 시각을 계산할 수 없어요")
     if kw.time_window == "sunset":

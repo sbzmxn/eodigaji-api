@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.keywords import combined_keyword_score, is_excluded, keyword_score, match_keywords, theme_of, time_status
-from app.sun import sunset
+from app.sun import sunrise, sunset
 from app.spots import mark_island_coast
 from conftest import KST, LCLS_NAMES, make_spot
 
@@ -113,3 +113,41 @@ def test_arrival_based_activation(settings):
     now = _at(15, 50)
     assert not time_status(kw, now + timedelta(minutes=15), sd, tw).active   # 16:05 도착
     assert time_status(kw, now + timedelta(minutes=60), sd, tw).active       # 16:50 도착
+
+
+# ---- 일출 --------------------------------------------------------------------
+@pytest.mark.parametrize("day,hh,mm", [(datetime(2024, 6, 21), 5, 11), (datetime(2024, 12, 21), 7, 43)])
+def test_sunrise_seoul(day, hh, mm):
+    s = sunrise(day.date(), 37.5665, 126.9780, KST)
+    target = s.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    assert abs((s - target).total_seconds()) <= 180
+
+
+def test_sunrise_window(settings):
+    kw, tw = settings.keywords.keywords["sunrise"], settings.time_windows
+    sr = _at(7, 10)
+    assert time_status(kw, _at(6, 40), _at(17, 20), tw, sr).active          # 30분 전
+    assert time_status(kw, _at(7, 10), _at(17, 20), tw, sr).active          # 일출 시각
+    off = time_status(kw, _at(6, 39), _at(17, 20), tw, sr)
+    assert not off.active and off.reason == "일출은 07:10이에요"
+    assert not time_status(kw, _at(7, 11), _at(17, 20), tw, sr).active
+    assert time_status(kw, _at(7, 0), _at(17, 20), tw, None).reason == "일출 시각을 계산할 수 없어요"
+
+
+def test_sunrise_window_from_config(settings):
+    kw, tw = settings.keywords.keywords["sunrise"], settings.time_windows
+    tw.sunrise_before_min, tw.sunrise_after_min = 10, 15
+    sr = _at(7, 10)
+    assert not time_status(kw, _at(6, 59), None, tw, sr).active
+    assert time_status(kw, _at(7, 25), None, tw, sr).active
+
+
+def test_sunrise_keyword_score(settings):
+    beach = make_spot("1", "어느 해변", lcls3="NA020900", regn="47")
+    tower = make_spot("2", "높은 전망대", lcls3="VE010200")
+    lake = make_spot("3", "큰 저수지", lcls3="NA020300")
+    park = make_spot("4", "해돋이 근린공원", lcls3="VE030400")
+    assert ks("sunrise", beach, settings) == 0.5
+    assert ks("sunrise", tower, settings, "해돋이 명소") == 1.0
+    assert ks("sunrise", lake, settings, "일출이 아름답다") == 1.0
+    assert ks("sunrise", park, settings) == 0                              # 텍스트만으론 안 됨

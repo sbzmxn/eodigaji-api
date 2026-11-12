@@ -1,4 +1,4 @@
-"""일몰 시각 로컬 계산 (NOAA 근사식, 외부 API 없음). 오차는 보통 ±1~2분."""
+"""일출·일몰 시각 로컬 계산 (NOAA 근사식, 외부 API 없음). 오차는 보통 ±1~2분."""
 from __future__ import annotations
 
 import math
@@ -7,6 +7,15 @@ from datetime import date, datetime, time, timedelta, tzinfo
 
 def sunset(day: date, lat: float, lng: float, tz: tzinfo) -> datetime | None:
     """해당 날짜·좌표의 일몰 시각 (tz 기준 aware datetime). 백야/극야면 None."""
+    return _sun_event(day, lat, lng, tz, rising=False)
+
+
+def sunrise(day: date, lat: float, lng: float, tz: tzinfo) -> datetime | None:
+    """해당 날짜·좌표의 일출 시각 (tz 기준 aware datetime). 백야/극야면 None."""
+    return _sun_event(day, lat, lng, tz, rising=True)
+
+
+def _sun_event(day: date, lat: float, lng: float, tz: tzinfo, rising: bool) -> datetime | None:
     n = day.timetuple().tm_yday
     gamma = 2 * math.pi / 365 * (n - 1 + 0.5)  # 정오 기준
     eqtime = 229.18 * (
@@ -23,7 +32,7 @@ def sunset(day: date, lat: float, lng: float, tz: tzinfo) -> datetime | None:
     if not -1 <= cos_ha <= 1:
         return None
     ha = math.degrees(math.acos(cos_ha))
-    utc_minutes = 720 - 4 * (lng - ha) - eqtime  # 일몰은 +ha
+    utc_minutes = 720 - 4 * (lng + ha if rising else lng - ha) - eqtime  # 일출은 -ha, 일몰은 +ha
     base = datetime.combine(day, time(0, 0), tzinfo=tz)
     offset = base.utcoffset() or timedelta(0)
     local_minutes = utc_minutes + offset.total_seconds() / 60

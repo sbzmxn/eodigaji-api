@@ -1,6 +1,6 @@
 # 힐링 키워드 ↔ 한국관광공사 신분류(lclsSystm3) 매핑.
 # lcls: 분류 일치(1.0) / title: 제목·소개글 단어 일치(0.5)
-# 노을·야경: base 키워드의 '분류'에 맞아야 후보(필수), text 는 가산점.
+# 일출·노을·야경: base 키워드의 '분류'에 맞아야 후보(필수), text 는 가산점.
 # 근거: docs/EVALUATION.md (2026-11-11 실측)
 
 # 섬(NA020500)의 바다/물가 판정: 같은 시·군·구에 아래 분류(항구/포구, 해안절경, 해변·해수욕장, 등대)가
@@ -35,6 +35,11 @@ keywords:
     label: 고즈넉
     lcls: [HS030100, HS010400, HS010500, HS010600, EX040100, EX040200]  # 불교, 고택, 생가, 민속마을, 템플스테이, 사찰문화체험
     title: [고택, 한옥, 서원, 향교, 종택]
+  sunrise:
+    label: 일출
+    time_window: sunrise
+    base: [sea, water, view]
+    text: [일출, 해돋이]
   sunset:
     label: 노을
     time_window: sunset

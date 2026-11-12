@@ -59,7 +59,7 @@ def test_live_keywords_and_recommend(live_client, loc):
     """실제 인덱스로 7곳 × 30분. 상세는 content_id 캐시라 재실행 시 호출이 거의 없다."""
     q = {"lat": loc["lat"], "lng": loc["lng"], "drive_minutes": 30}
     rk = live_client.get("/api/v1/keywords", params=q)
-    assert rk.status_code == 200 and len(rk.json()["keywords"]) == 8
+    assert rk.status_code == 200 and len(rk.json()["keywords"]) == 9
     rr = live_client.post("/api/v1/recommend", json={"latitude": loc["lat"], "longitude": loc["lng"],
                                                      "drive_minutes": 30, "keyword_ids": []})
     assert rr.status_code == 200, rr.text
@@ -89,3 +89,44 @@ def test_live_retry_with_slow_eta(live_client, loc):
     factor = j1["estimated_drive_seconds"] / observed
     if j1["estimated_drive_seconds"] >= s.retry.min_estimated_seconds:
         assert j2["straight_km"] <= radius_km(30 * factor, s.radius) + 0.01
+
+
+# ---- 새벽(일출) 시간대 ------------------------------------------------------------
+@pytest.fixture(scope="module")
+def dawn_client(real_settings):
+    """now_fn 을 바꿀 수 있는 실제 서버. 7곳 각각 '다음 날 일출 15분 전 도착'으로 맞춘다."""
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+    clock = {}
+    app = create_app(real_settings, now_fn=lambda: clock["now"])
+    with TestClient(app) as c:
+        yield c, clock
+    print(f"\n[integration dawn] 관광 API 호출 {app.state.index.tour.calls}회")
+
+
+@pytest.mark.parametrize("loc", LOCATIONS, ids=[l["name"] for l in LOCATIONS])
+def test_live_sunrise_at_dawn(dawn_client, loc):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from app.sun import sunrise
+    c, clock = dawn_client
+    kst = ZoneInfo("Asia/Seoul")
+    sr = sunrise((datetime.now(kst) + timedelta(days=1)).date(), loc["lat"], loc["lng"], kst)
+    # 60분: 안동은 30분 안에 바다·물가·전망 후보가 1곳뿐이라 일출(노을과 같음)이 꺼진다 (2026-11-13 실측)
+    clock["now"] = sr - timedelta(minutes=60 + 15)
+    rk = c.get("/api/v1/keywords", params={"lat": loc["lat"], "lng": loc["lng"], "drive_minutes": 60})
+    assert rk.status_code == 200
+    ks = {k["id"]: k for k in rk.json()["keywords"]}
+    assert list(ks)[6] == "sunrise" and len(ks) == 9
+    assert ks["sunrise"]["enabled"], ks["sunrise"]
+    assert not ks["sunset"]["enabled"] and not ks["night"]["enabled"]
+    rr = c.post("/api/v1/recommend", json={"latitude": loc["lat"], "longitude": loc["lng"], "drive_minutes": 60,
+                                           "keyword_ids": ["sunrise"]})
+    assert rr.status_code == 200, rr.text
+    j = rr.json()
+    assert j["reveal"]["matched_keywords"] == ["sunrise"]
+    assert 0 < j["estimated_drive_seconds"] <= 60 * 60
+    clock["now"] = sr + timedelta(hours=3)                     # 낮 → 꺼짐, 사유에 일출 시각
+    off = {k["id"]: k for k in c.get("/api/v1/keywords", params={"lat": loc["lat"], "lng": loc["lng"],
+                                                                 "drive_minutes": 60}).json()["keywords"]}
+    assert not off["sunrise"]["enabled"] and off["sunrise"]["reason"].startswith("일출은 ")

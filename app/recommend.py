@@ -84,9 +84,11 @@ class Recommender:
         if len(kids) > 3 or len(set(kids)) != len(kids) or any(k not in known for k in kids):
             raise ApiError("INVALID_KEYWORD", "keyword_ids 는 정의된 키워드 중 중복 없이 0~3개여야 합니다")
 
-    def _times(self, lat: float, lng: float, drive: int) -> tuple[datetime, Optional[datetime]]:
+    def _times(self, lat: float, lng: float, drive: int):
+        """도착 예상 시각과 도착일의 일몰·일출 시각."""
         arrival = self.now_fn().astimezone(self.tz) + timedelta(minutes=drive)
-        return arrival, sun.sunset(arrival.date(), lat, lng, self.tz)
+        day = arrival.date()
+        return arrival, sun.sunset(day, lat, lng, self.tz), sun.sunrise(day, lat, lng, self.tz)
 
     async def _near(self, lat: float, lng: float, r: float):
         try:
@@ -120,7 +122,7 @@ class Recommender:
     async def keywords_status(self, lat: float, lng: float, drive: int) -> dict:
         self._check_location(lat, lng)
         self._check_drive(drive)
-        arrival, sunset_dt = self._times(lat, lng, drive)
+        arrival, sunset_dt, sunrise_dt = self._times(lat, lng, drive)
         near = await self._near(lat, lng, radius_km(drive, self.s.radius))
         kcfg, sc = self.s.keywords, self.s.scoring
         counts = {k: 0 for k in kcfg.ids}
@@ -132,7 +134,7 @@ class Recommender:
                     counts[k] += 1
         out = []
         for k, kw in kcfg.keywords.items():
-            ts = time_status(kw, arrival, sunset_dt, self.s.time_windows)
+            ts = time_status(kw, arrival, sunset_dt, self.s.time_windows, sunrise_dt)
             if not ts.active:
                 out.append({"id": k, "label": kw.label, "enabled": False, "reason": ts.reason})
             elif counts[k] < self.s.candidates.min_for_keyword:
@@ -170,8 +172,9 @@ class Recommender:
         self._check_drive(drive)
         self._check_keywords(kids)
         kcfg, sc = self.s.keywords, self.s.scoring
-        arrival, sunset_dt = self._times(lat, lng, drive)
-        active = [k for k in kids if time_status(kcfg.keywords[k], arrival, sunset_dt, self.s.time_windows).active]
+        arrival, sunset_dt, sunrise_dt = self._times(lat, lng, drive)
+        active = [k for k in kids
+                  if time_status(kcfg.keywords[k], arrival, sunset_dt, self.s.time_windows, sunrise_dt).active]
         if kids and not active:
             raise ApiError("KEYWORD_UNAVAILABLE", "고른 키워드를 도착 예상 시각에는 쓸 수 없어요")
 

@@ -48,7 +48,7 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 
 | 메서드 | 경로 | 용도 |
 |---|---|---|
-| GET | `/api/v1/keywords?lat=&lng=&drive_minutes=` | 키워드 8개의 활성 여부와 비활성 사유 (예: `"지금 시간으론 멀어요"`, `"일몰은 17:25이에요"`) |
+| GET | `/api/v1/keywords?lat=&lng=&drive_minutes=` | 키워드 9개의 활성 여부와 비활성 사유 (예: `"지금 시간으론 멀어요"`, `"일몰은 17:25이에요"`) |
 | POST | `/api/v1/recommend` | 장소 1곳 추천: 목적지 좌표, 힌트(주차·요금·도착 시 운영), 도착 후 공개 정보, 직선거리·서버 추정 운전시간 (+ 호환용 가명). `retry_context` 로 실제 ETA 를 보내면 그 요청만 속도를 보정해 재추천 |
 | GET | `/healthz` | 관광지 인덱스 적재 상태 |
 
@@ -57,7 +57,7 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 {"latitude": 37.4979, "longitude": 127.0276, "drive_minutes": 30, "keyword_ids": ["forest", "walk"], "exclude_content_ids": []}
 ```
 
-- 키워드 id: `sea` 바다, `water` 호수·강, `forest` 숲, `walk` 산책, `view` 전망, `quiet` 고즈넉, `sunset` 노을, `night` 야경 (0~3개).
+- 키워드 id: `sea` 바다, `water` 호수·강, `forest` 숲, `walk` 산책, `view` 전망, `quiet` 고즈넉, `sunrise` 일출, `sunset` 노을, `night` 야경 (0~3개).
 - 에러는 `{"error": {"code", "message", "request_id"}}` 형식입니다.
   코드: `INVALID_REQUEST`, `INVALID_LOCATION`, `INVALID_KEYWORD`, `KEYWORD_UNAVAILABLE`, `NO_CANDIDATES`, `UPSTREAM_TOUR_API_ERROR`, `INTERNAL_ERROR`.
 - 자동 재추천: 앱이 `requestTrip` 실제 ETA 가 설정 시간을 넘으면 `"retry_context": {"previous_content_ids": [...], "observed_eta_seconds": 1530}` 을 담아 다시 요청한다(최대 3회). 보정값은 저장하지 않는다.

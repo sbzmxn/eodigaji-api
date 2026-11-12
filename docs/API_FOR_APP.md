@@ -1,7 +1,7 @@
 # 어디가지? 추천 서버 API — 앱 팀용
 
-> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds` 추가). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
-> 시연 서버 주소는 ngrok 주소로 바뀐다. 아래 `BASE` 를 바꿔 쓰면 된다.
+> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds`, 키워드 `sunrise` 추가). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
+> 시연 때 서버는 노트북 안에서 돌고 에뮬레이터는 `http://10.0.2.2:8000/` 으로 붙는다. 다른 환경(ngrok 등)이면 아래 `BASE` 를 바꿔 쓰면 된다.
 
 ## 0. 한눈에 보기
 
@@ -16,12 +16,12 @@
 - 시간 입력은 **목적지까지 편도 운전 시간** `drive_minutes` (15~120분). 예전 `available_minutes` 는 폐기됐다(보내면 400).
 - **가명은 앱 `BlindNames`([`BlindNames.kt`](BlindNames.kt))에서 고른다. 서버 응답의 `blind_name` 은 쓰지 않아도 된다.** (호환을 위해 당분간 같은 100개 목록에서 고른 값을 내려준다.)
 - 서버는 좌표를 저장·로그하지 않는다. 사용자 식별자는 보내지 않는다.
-- 타임아웃 권장: `/keywords` 5초, `/recommend` 15초(호출 1회). 재추천을 포함한 로딩 화면 전체는 25초 ([2-4](#2-4-로딩-시간과-타임아웃)).
+- 타임아웃 권장: `/keywords` 5초, `/recommend` 10초(호출 1회). 재추천을 포함한 로딩 화면 전체는 **12초** ([2-4](#2-4-로딩-시간과-타임아웃)).
 
 ## 1. 엔드포인트와 curl
 
 ```bash
-BASE=http://localhost:8000          # 시연: https://xxxx.ngrok-free.app
+BASE=http://localhost:8000          # 에뮬레이터에서는 http://10.0.2.2:8000
 
 # 키워드 상태
 curl "$BASE/api/v1/keywords?lat=37.4979&lng=127.0276&drive_minutes=30"
@@ -58,19 +58,21 @@ curl "$BASE/healthz"
     {"id": "walk", "label": "산책", "enabled": true, "reason": null},
     {"id": "view", "label": "전망", "enabled": true, "reason": null},
     {"id": "quiet", "label": "고즈넉", "enabled": true, "reason": null},
+    {"id": "sunrise", "label": "일출", "enabled": false, "reason": "일출은 07:07이에요"},
     {"id": "sunset", "label": "노을", "enabled": false, "reason": "일몰은 17:25이에요"},
     {"id": "night", "label": "야경", "enabled": true, "reason": null}
   ]
 }
 ```
 
-- `keywords` 는 항상 8개, 항상 이 순서.
+- `keywords` 는 항상 9개, 항상 이 순서: `sea, water, forest, walk, view, quiet, sunrise, sunset, night`.
 - `enabled=false` 면 칩을 비활성으로 그리고 `reason` 을 그대로 보여 준다. `reason` 은 `enabled=true` 일 때 `null`.
 - 비활성 사유 문구는 서버가 정한다:
   - `지금 시간으론 멀어요` — 이 운전 시간 안에 해당 장소가 3곳 미만
+  - `일출은 HH:MM이에요` — 일출: 도착 예상이 일출 30분 전 ~ 일출 시각이 아님 (도착일의 일출, 좌표로 로컬 계산)
   - `일몰은 HH:MM이에요` — 노을: 도착 예상이 일몰 60분 전 ~ 20분 후가 아님
   - `HH:MM 이후 도착부터 볼 수 있어요` / `야경 안내는 23:00까지예요` — 야경: 일몰 30분 후 ~ 23:00
-- `arrival_time` = 현재 + drive_minutes, `sunset_time` = 도착일 일몰(로컬 계산). 화면 표시용으로 써도 된다.
+- `arrival_time` = 현재 + drive_minutes, `sunset_time` = 도착일 일몰(로컬 계산). 화면 표시용으로 써도 된다. 일출 시각은 별도 필드 없이 `reason` 문구에만 들어간다.
 
 ### 2-2. `POST /api/v1/recommend`
 
@@ -199,7 +201,7 @@ for (attempt in 1..3) {
 
 ### 2-4. 로딩 시간과 타임아웃
 
-**앱 총 대기 시간 = Σ(서버 시간 + 네트워크 왕복) + `requestTrip` 시간 × 횟수**. 추천 n회(1~3)면 `requestTrip` 도 n회다.
+**앱 총 대기 시간 = 서버 시간(n회 합계) + `requestTrip` 시간 × n**. 추천 n회(1~3)면 `requestTrip` 도 n회다. 시연에서는 서버가 같은 노트북에서 돌기 때문에(에뮬레이터 → `10.0.2.2`) 네트워크 왕복은 0으로 본다.
 
 서버 시간(2026-11-13 실측, 7곳 × 30·60분, 프로세스 내, 네트워크 제외):
 
@@ -208,11 +210,18 @@ for (attempt in 1..3) {
 | 없음 | 0.34 / 1.6 / 3.8초 | 0.63 / 1.9 / 4.0초 | 0.90 / 2.3 / 4.2초 |
 | 있음 | 0.007 / 0.013 / 0.04초 | 0.012 / 0.14 / 0.18초 | 0.016 / 0.17 / 0.38초 |
 
-계산 예: 3회 모두 돌고 서버 p95 2.3초, ngrok 왕복 0.5초 × 3, `requestTrip` 2초 × 3 → 2.3 + 1.5 + 6 = **약 10초**. `requestTrip` 시간은 에뮬레이터에서 재서 넣는다.
+`requestTrip` 은 실측 최대 약 1초(에뮬레이터 실측).
+
+| 추천 횟수 | 상세 캐시 없음 p95 / 최대 | 상세 캐시 있음 p95 / 최대 |
+|---|---|---|
+| 1회 | 1.6 + 1 = 2.6초 / 3.8 + 1 = 4.8초 | 0.01 + 1 ≈ 1.0초 / 0.04 + 1 ≈ 1.0초 |
+| 2회 | 1.9 + 2 = 3.9초 / 4.0 + 2 = 6.0초 | 0.14 + 2 ≈ 2.1초 / 0.18 + 2 ≈ 2.2초 |
+| 3회 | 2.3 + 3 = 5.3초 / 4.2 + 3 = **7.2초** | 0.17 + 3 ≈ 3.2초 / 0.38 + 3 ≈ 3.4초 |
 
 권장
-- `/recommend` 호출 1회 타임아웃 15초 (관광 API 가 느릴 때 상세 조회 재시도까지 포함).
-- 로딩 화면 전체 타임아웃 **25초**. 넘으면 그때까지 받은 마지막 추천으로 안내하고, 하나도 없으면 "잠시 후 다시 시도해 주세요".
+- 로딩 화면 전체 제한 시간 **12초** (실측 최악 7.2초 + 여유). 넘으면 그때까지 받은 마지막 추천으로 안내하고, 하나도 없으면 "잠시 후 다시 시도해 주세요".
+- `/recommend` 호출 1회 타임아웃 10초. 단 전체 12초 안에서 남은 시간을 넘지 않게 한다.
+- 로딩 연출은 캐시가 있어 금방 끝나도 **최소 1.5초** 보여 준다(뽑기 느낌 유지, 깜빡임 방지).
 - 로딩 화면에는 "가까운 곳을 다시 찾는 중…"처럼 재추천 단계(1/3, 2/3…)를 보여 주면 대기가 덜 길게 느껴진다.
 
 ## 3. Kotlin (Gson + Retrofit)
@@ -317,10 +326,10 @@ fun <T> Response<T>.apiError(gson: com.google.gson.Gson): ErrorBody? =
 ```kotlin
 // Retrofit 생성 예
 val api = retrofit2.Retrofit.Builder()
-    .baseUrl("https://xxxx.ngrok-free.app/")      // 끝에 / 필수
+    .baseUrl("http://10.0.2.2:8000/")             // 에뮬레이터 → 노트북 서버. 끝에 / 필수 (http 면 cleartext 허용 필요)
     .addConverterFactory(retrofit2.converter.gson.GsonConverterFactory.create())
     .client(okhttp3.OkHttpClient.Builder()
-        .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
         .build())
     .build()
     .create(EodigajiApi::class.java)
@@ -339,11 +348,11 @@ val api = retrofit2.Retrofit.Builder()
 | `INVALID_REQUEST` | 400 | 형식 오류, `drive_minutes` 범위 밖, `available_minutes` 사용, `retry_context` 값 오류(`observed_eta_seconds` ≤ 0 등) | `drive_minutes 는 15~120 사이여야 합니다` / `available_minutes는 drive_minutes(편도 운전 시간, 분)로 변경됐어요` | "요청을 처리하지 못했어요. 앱을 최신 버전으로 업데이트해 주세요." (앱 버그이므로 로그 수집) |
 | `INVALID_LOCATION` | 400 | 좌표 형식 오류, 대한민국 범위 밖 | `서비스 지역(대한민국) 밖의 좌표입니다` | "현재 위치를 확인할 수 없어요. 잠시 후 다시 시도해 주세요." (FusedLocation 재조회) |
 | `INVALID_KEYWORD` | 400 | 정의 안 된 키워드, 4개 이상, 중복 | `keyword_ids 는 정의된 키워드 중 중복 없이 0~3개여야 합니다` | "키워드를 다시 골라 주세요." |
-| `KEYWORD_UNAVAILABLE` | 400 | 고른 키워드가 **모두** 도착 시각에 쓸 수 없음(노을·야경) | `고른 키워드를 도착 예상 시각에는 쓸 수 없어요` | "지금 출발하면 볼 수 없는 키워드예요. 다른 키워드를 골라 주세요." → `/keywords` 다시 호출해 칩 갱신 |
+| `KEYWORD_UNAVAILABLE` | 400 | 고른 키워드가 **모두** 도착 시각에 쓸 수 없음(일출·노을·야경) | `고른 키워드를 도착 예상 시각에는 쓸 수 없어요` | "지금 출발하면 볼 수 없는 키워드예요. 다른 키워드를 골라 주세요." → `/keywords` 다시 호출해 칩 갱신 |
 | `NO_CANDIDATES` | 404 | 조건에 맞는 장소 없음, 또는 모두 도착일 휴무, 또는 `exclude_content_ids` 로 다 빠짐 | `조건에 맞는 장소가 없어요` / `도착 예상 시각에 문을 여는 장소가 없어요` | "조건에 맞는 곳이 없어요. 운전 시간을 늘리거나 키워드를 바꿔 보세요." |
 | `UPSTREAM_TOUR_API_ERROR` | 502 | 관광 정보 서버 장애 + 서버 캐시 없음 | `관광 정보 서버에서 목록을 가져오지 못했습니다` | "장소 정보를 불러오지 못했어요. 잠시 후 다시 시도해 주세요." |
 | `INTERNAL_ERROR` | 500 | 서버 내부 오류 | `서버 내부 오류` | "잠시 후 다시 시도해 주세요." |
-| (네트워크 실패/타임아웃) | - | ngrok 끊김 등 | - | "서버에 연결할 수 없어요. 네트워크를 확인해 주세요." |
+| (네트워크 실패/타임아웃) | - | 서버 꺼짐, 주소 오류 등 | - | "서버에 연결할 수 없어요. 네트워크를 확인해 주세요." |
 
 참고: 일부 키워드만 시간상 못 쓰는 경우(예: `["walk","sunset"]` 인데 노을 시간이 아님)는 에러가 아니다. 서버가 쓸 수 없는 키워드만 빼고 추천한다.
 
@@ -357,13 +366,14 @@ object Keyword {
     const val WALK = "walk"      // 산책
     const val VIEW = "view"      // 전망
     const val QUIET = "quiet"    // 고즈넉
+    const val SUNRISE = "sunrise" // 일출 (도착 시각이 일출 30분 전 ~ 일출)
     const val SUNSET = "sunset"  // 노을 (도착 시각이 일몰 60분 전 ~ 20분 후)
     const val NIGHT = "night"    // 야경 (도착 시각이 일몰 30분 후 ~ 23:00)
 
     /** 서버 응답 순서와 같다. 표시명은 가능하면 /keywords 응답의 label 을 쓴다. */
     val LABELS: Map<String, String> = linkedMapOf(
         SEA to "바다", WATER to "호수·강", FOREST to "숲", WALK to "산책",
-        VIEW to "전망", QUIET to "고즈넉", SUNSET to "노을", NIGHT to "야경",
+        VIEW to "전망", QUIET to "고즈넉", SUNRISE to "일출", SUNSET to "노을", NIGHT to "야경",
     )
     const val MAX_SELECT = 3
 }

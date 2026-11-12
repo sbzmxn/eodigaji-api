@@ -125,6 +125,7 @@ def test_no_candidates(settings, origin):
     ({"drive_minutes": 10}, "INVALID_REQUEST"),
     ({"drive_minutes": 121}, "INVALID_REQUEST"),
     ({"keyword_ids": ["night"]}, "KEYWORD_UNAVAILABLE"),  # 14:15 도착
+    ({"keyword_ids": ["sunrise"]}, "KEYWORD_UNAVAILABLE"),
 ])
 def test_errors(settings, over, code):
     o = (LOCATIONS[0]["lat"], LOCATIONS[0]["lng"])
@@ -192,13 +193,14 @@ def test_keywords_endpoint(settings, origin):
     assert r.status_code == 200, r.text
     j = r.json()
     ks = {k["id"]: k for k in j["keywords"]}
-    assert list(ks) == ["sea", "water", "forest", "walk", "view", "quiet", "sunset", "night"]
+    assert list(ks) == ["sea", "water", "forest", "walk", "view", "quiet", "sunrise", "sunset", "night"]
     assert j["arrival_time"] == "14:15" and j["sunset_time"].startswith("17:")
     assert ks["walk"]["enabled"] is True and ks["walk"]["reason"] is None
     assert ks["sea"] == {"id": "sea", "label": "바다", "enabled": False, "reason": "지금 시간으론 멀어요"}
     assert ks["water"]["enabled"] is False                    # 1곳뿐 (<3)
     assert ks["sunset"]["reason"] == f"일몰은 {j['sunset_time']}이에요"
     assert "이후 도착부터" in ks["night"]["reason"]
+    assert ks["sunrise"]["enabled"] is False and ks["sunrise"]["reason"].startswith("일출은 0")
 
 
 def test_keywords_sunset_enabled_near_sunset(settings, origin):
@@ -313,3 +315,33 @@ def test_retry_context_validation(settings, rc):
         r = c.post("/api/v1/recommend", json=body(o, retry_context=rc))
     e = r.json()["error"]
     assert r.status_code == 400 and e["code"] == "INVALID_REQUEST" and "abc" not in e["message"]
+
+
+# ---- 일출 (새벽 도착) ----------------------------------------------------------
+def _dawn(origin, before_min=15, drive=15):
+    """도착 = 다음 날 일출 before_min 분 전이 되도록 한 현재 시각."""
+    from datetime import timedelta
+    from app.sun import sunrise
+    sr = sunrise((NOW + timedelta(days=1)).date(), origin[0], origin[1], NOW.tzinfo)
+    return sr - timedelta(minutes=before_min + drive), sr
+
+
+def test_keywords_sunrise_enabled_at_dawn(settings, origin):
+    spots = [make_spot(f"v{i}", f"높은곳{i}", north_km=4 + i * 0.3, lcls3="VE010200", base=origin) for i in range(3)]
+    now, sr = _dawn(origin)
+    with client(settings, origin, spots=spots, now=now) as c:
+        j = c.get("/api/v1/keywords", params={"lat": origin[0], "lng": origin[1], "drive_minutes": 15}).json()
+    ks = {k["id"]: k for k in j["keywords"]}
+    assert len(ks) == 9 and ks["sunrise"]["enabled"] and ks["sunrise"]["reason"] is None
+    assert not ks["sunset"]["enabled"] and not ks["night"]["enabled"]
+
+
+def test_recommend_sunrise_at_dawn(settings, origin):
+    spots = spots_around(origin) + [make_spot("s1", "동쪽해변", north_km=-4.0, east_km=1.0, lcls3="NA020900",
+                                              regn="47", base=origin)]
+    d = FakeDetails({"s1": Detail(overview="해돋이 명소", parking="가능", restdate="", usetime="상시")})
+    now, _ = _dawn(origin)
+    with client(settings, origin, spots=spots, details=d, now=now) as c:
+        j = c.post("/api/v1/recommend", json=body(origin, keyword_ids=["sunrise"])).json()
+    assert j["reveal"]["content_id"] in {"s1", "w1", "v1"}                  # 바다·물가·전망만
+    assert "sunrise" in j["reveal"]["matched_keywords"]

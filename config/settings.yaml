@@ -71,6 +71,8 @@ scoring:
   min_weight: 0.05
 
 time_windows:
+  sunrise_before_min: 30   # 일출: 도착 예상이 일출 30분 전 ~ 일출 + sunrise_after_min
+  sunrise_after_min: 0
   sunset_before_min: 60
   sunset_after_min: 20
   night_after_sunset_min: 30

@@ -82,6 +82,8 @@ class ScoringCfg(BaseModel):
 
 
 class TimeWindowCfg(BaseModel):
+    sunrise_before_min: int = 30
+    sunrise_after_min: int = 0
     sunset_before_min: int = 60
     sunset_after_min: int = 20
     night_after_sunset_min: int = 30
@@ -129,7 +131,7 @@ class KeywordDef(BaseModel):
     title: list[str] = Field(default_factory=list)
     inland_exclude_lcls: list[str] = Field(default_factory=list)
     inland_only_lcls: list[str] = Field(default_factory=list)
-    time_window: Optional[Literal["sunset", "night"]] = None
+    time_window: Optional[Literal["sunrise", "sunset", "night"]] = None
     base: list[str] = Field(default_factory=list)
     extra_lcls: list[str] = Field(default_factory=list)
     text: list[str] = Field(default_factory=list)
