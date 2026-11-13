@@ -122,6 +122,8 @@ withTimeoutOrNull(12_000) {                               // 전체 제한 12초
 
 ## 앱 저장소·서버 연결
 
+바로 쓸 수 있는 코드: [`docs/VisitedSpotsDb.kt`](VisitedSpotsDb.kt)(도감 저장·목록·좋아요/별로·개별/전체 삭제), [`docs/RecentBlindNames.kt`](RecentBlindNames.kt)(최근 가명 10개). 앱 프로젝트에 복사하고 맨 윗줄 패키지명만 바꾸면 됩니다. 아래는 구조 설명입니다.
+
 ### 도감 테이블
 
 ```sql
