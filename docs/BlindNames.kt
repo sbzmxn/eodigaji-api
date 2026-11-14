@@ -6,7 +6,7 @@ import kotlin.random.Random
  * 블라인드 가명 100개. 목적지를 짐작할 수 없는 추상적·따뜻한 이름만 담았습니다.
  *
  * - 서버 저장소의 config/alias_pool.yaml 과 같은 목록입니다. 서버 테스트가 두 목록의 일치와 금지어 검증을 검사합니다.
- *   목록을 바꿀 때는 저장소 관리자에게 요청해 두 파일을 함께 바꿉니다.
+ *   목록을 바꿀 때는 서버의 config/alias_pool.yaml 과 함께 바꿉니다(서버 테스트가 두 목록의 일치를 검사합니다).
  * - 사용: `BlindNames.pick(recent)` — recent 에 최근 쓴 이름(예: 10개)을 넘기면 같은 이름이 연달아 나오지 않습니다.
  */
 object BlindNames {

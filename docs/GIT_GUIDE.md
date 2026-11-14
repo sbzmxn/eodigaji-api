@@ -19,7 +19,7 @@
 
 1. https://github.com/sbzmxn/eodigaji 에 들어갑니다.
 2. `docs` 폴더를 누릅니다. 우리가 볼 파일은 여기 있습니다.
-   - `TEAM_HANDOFF.md`: 팀원별 할 일과 코드
+   - `TEAM_HANDOFF.md`: 영역별 할 일과 코드
    - `BlindNames.kt`: 가명 100개 + 고르는 함수
    - `API_FOR_APP.md`: API 전체 명세
 3. 파일을 누르면 내용이 보입니다.

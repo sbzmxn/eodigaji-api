@@ -12,7 +12,7 @@
 | `config/` | 튜닝 값: `settings.yaml`(반경·점수·시간 구간·섬 규칙), `keywords.yaml`(키워드↔관광 분류), `alias_pool.yaml`(검수된 가명 100개), `alias.yaml`(가명 금지어 규칙) |
 | `tests/` | 단위 테스트(mock), 실제 API 통합 테스트(`-m integration`), 테스트 데이터(출발 좌표 7곳 등) |
 | `scripts/` | `demo_call.sh`(시연 호출), `check_locations.py`(7곳 점검), `warmup.py`(시연 전 캐시 예열), `measure_speed.py`(속도 측정), `generate_alias_pool.py`(가명 후보 일회성 생성, Ollama 필요) |
-| `docs/` | `API_FOR_APP.md`(앱 팀용 API 명세), `BlindNames.kt`(앱용 가명 100개), `TEAM_HANDOFF.md`(팀원별 연동), `GIT_GUIDE.md`(저장소 사용법), `EVALUATION.md`(평가 결과) |
+| `docs/` | `API_FOR_APP.md`(앱 팀용 API 명세), `BlindNames.kt`(앱용 가명 100개), `TEAM_HANDOFF.md`(영역별 연동 안내), `GIT_GUIDE.md`(저장소 사용법), `EVALUATION.md`(평가 결과) |
 
 ## 빠른 시작
 
