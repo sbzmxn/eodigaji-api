@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # /keywords → /recommend 를 호출한다. 좌표는 기본값 없이 항상 인자로 받는다.
 #   scripts/demo_call.sh <위도> <경도> <drive_minutes> [keyword_ids(쉼표구분)]
-#   BASE=https://xxxx.ngrok-free.app scripts/demo_call.sh 37.4979 127.0276 30 forest,walk
+#   BASE=<외부 접속 주소> scripts/demo_call.sh 37.4979 127.0276 30 forest,walk
 set -euo pipefail
 if [ $# -lt 3 ]; then
   echo "사용법: $0 <위도> <경도> <drive_minutes 15~120> [keyword_ids 예: forest,walk]" >&2

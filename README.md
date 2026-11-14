@@ -30,7 +30,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```bash
 # 좌표는 항상 인자로: <위도> <경도> <drive_minutes 15~120> [keyword_ids]
 scripts/demo_call.sh 37.4979 127.0276 30 forest,walk
-BASE=https://xxxx.ngrok-free.app scripts/demo_call.sh 33.4996 126.5312 45
 ```
 
 가명은 팀이 검수한 100개 목록(`config/alias_pool.yaml`)에서 고릅니다. 앱은 같은 목록을 [`docs/BlindNames.kt`](docs/BlindNames.kt)로 직접 쓰며, 서버 응답의 `blind_name` 은 호환용입니다.
@@ -61,7 +60,7 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 - 키워드 id: `sea` 바다, `water` 호수·강, `forest` 숲, `walk` 산책, `view` 전망, `quiet` 고즈넉, `sunrise` 일출, `sunset` 노을, `night` 야경 (0~3개).
 - 에러는 `{"error": {"code", "message", "request_id"}}` 형식입니다.
   코드: `INVALID_REQUEST`, `INVALID_LOCATION`, `INVALID_KEYWORD`, `KEYWORD_UNAVAILABLE`, `NO_CANDIDATES`, `CONDITION_NOT_MET`, `UPSTREAM_TOUR_API_ERROR`, `INTERNAL_ERROR`.
-- 조건: `"require_parking": true` 면 주차 '가능'으로 확인된 곳만, `"exclude_paid": true` 면 '유료' 제외(무료·정보 없음 포함). 점수 상위부터 5곳씩, 요청당 최대 10곳 상세조회. 못 찾으면 `CONDITION_NOT_MET`(404). `/keywords` 도 같은 쿼리를 받아 캐시 기반 추정으로 칩을 끈다.
+- 조건: `"require_parking": true` 면 주차 '가능'으로 확인된 곳만, `"exclude_paid": true` 면 '유료' 제외(무료·정보 없음 포함). 점수 상위부터 5곳씩, 요청당 최대 10곳 상세조회. 못 찾으면 `CONDITION_NOT_MET`(404). `/keywords` 도 같은 쿼리를 받아 캐시 기반 추정으로 키워드 타일을 끈다.
 - 자동 재추천: 앱은 `requestTrip` ETA 를 `POST /api/v1/eta-check` 에 보내고 `decision` 만 따른다. 서버가 시간 비교·횟수(최대 3회)·재추천(속도 보정 + 이전 후보 제외)을 맡는다. 예전 `/recommend` 의 `retry_context` 방식도 호환용으로 동작한다. 보정값은 저장하지 않는다.
 - 서버는 사용자 좌표를 저장·로그하지 않고, 관광 API 로도 보내지 않습니다.
 

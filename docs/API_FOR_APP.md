@@ -1,14 +1,14 @@
 # 어디가지? 추천 서버 API — 앱 팀용
 
 > 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds`, 키워드 `sunrise`, 추천 조건 `require_parking`·`exclude_paid`, `POST /api/v1/eta-check` 추가). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
-> 시연 때 서버는 노트북 안에서 돌고 에뮬레이터는 `http://10.0.2.2:8000/` 으로 붙는다. 다른 환경(ngrok 등)이면 아래 `BASE` 를 바꿔 쓰면 된다.
+> 시연 때 서버는 노트북 안에서 돌고 에뮬레이터는 `http://10.0.2.2:8000/` 으로 붙는다. 다른 환경이면 외부 접속 주소로 `BASE` 를 바꿔 쓰면 된다.
 
 ## 0. 한눈에 보기
 
 | 순서 | 호출 | 언제 |
 |---|---|---|
-| 1 | `GET /api/v1/keywords` | 운전 시간 슬라이더나 조건 스위치(주차 가능한 곳만·유료 체험 제외)가 바뀔 때(디바운스 300ms 권장). 키워드 칩의 활성/비활성과 안내 문구 |
-| 2 | `POST /api/v1/recommend` | [뽑기] / [다시 뽑기] |
+| 1 | `GET /api/v1/keywords` | 운전 시간 프리셋이나 조건 선택 카드(주차 가능한 곳만·유료 체험 제외)가 바뀔 때(디바운스 300ms 권장). 키워드 타일의 활성/비활성과 안내 문구 |
+| 2 | `POST /api/v1/recommend` | [비밀 장소 뽑기] / [다시 뽑기] |
 | 3 | (앱) NaviHelper `requestTrip` → `POST /api/v1/eta-check` | 실제 ETA(초)를 서버에 보낸다. 서버가 `decision` 으로 답한다: `accept`·`fallback` 이면 `route_content_id` 로 안내, `retry` 면 같이 온 새 추천으로 3번을 반복([2-3](#2-3-eta-판단-post-apiv1eta-check)). 앱은 시간 비교·횟수 세기를 하지 않는다 |
 | 4 | (앱) NaviHelper `requestRoute` | 응답의 `destination` 좌표 + 앱이 `BlindNames.pick()` 으로 고른 가명 |
 | 5 | (앱) 도착·주차 후 | `reveal` 표시, 도감 저장 |
@@ -16,7 +16,7 @@
 - 시간 입력은 **목적지까지 편도 운전 시간** `drive_minutes` (15~120분). 예전 `available_minutes` 는 폐기됐다(보내면 400).
 - **가명은 앱 `BlindNames`([`BlindNames.kt`](BlindNames.kt))에서 고른다. 서버 응답의 `blind_name` 은 쓰지 않아도 된다.** (호환을 위해 당분간 같은 100개 목록에서 고른 값을 내려준다.)
 - 서버는 좌표를 저장·로그하지 않는다. 사용자 식별자는 보내지 않는다.
-- 타임아웃 권장: `/keywords` 5초, `/recommend` 10초(호출 1회). 재추천을 포함한 로딩 화면 전체는 **12초** ([2-4](#2-5-로딩-시간과-타임아웃)).
+- 타임아웃 권장: `/keywords` 5초, `/recommend` 10초(호출 1회). 재추천을 포함한 로딩 화면 전체는 **12초** ([2-5](#2-5-로딩-시간과-타임아웃)).
 
 ## 1. 엔드포인트와 curl
 
@@ -47,8 +47,8 @@ curl "$BASE/healthz"
 | `lat` | Double | ✔ | 현재 위도 (WGS84 십진 도) |
 | `lng` | Double | ✔ | 현재 경도 |
 | `drive_minutes` | Int | ✔ | 편도 운전 시간 15~120 |
-| `require_parking` | Boolean | | 기본 `false`. [주차 가능한 곳만] 스위치. `/recommend` 와 같은 값을 보낸다 |
-| `exclude_paid` | Boolean | | 기본 `false`. [유료 체험 제외] 스위치 |
+| `require_parking` | Boolean | | 기본 `false`. [주차 가능한 곳만] 조건 선택 카드. `/recommend` 와 같은 값을 보낸다 |
+| `exclude_paid` | Boolean | | 기본 `false`. [유료 체험 제외] 조건 선택 카드 |
 
 응답 200 (서울 강남, 30분, 20:59 호출 → 도착 21:29)
 
@@ -72,10 +72,10 @@ curl "$BASE/healthz"
 ```
 
 - `keywords` 는 항상 9개, 항상 이 순서: `sea, water, forest, walk, view, quiet, sunrise, sunset, night`.
-- `enabled=false` 면 칩을 비활성으로 그리고 `reason` 을 그대로 보여 준다. `reason` 은 `enabled=true` 일 때 `null`.
+- `enabled=false` 면 키워드 타일을 꺼짐 상태로 그리고 `reason` 을 그대로 보여 준다. `reason` 은 `enabled=true` 일 때 `null`.
 - 비활성 사유 문구는 서버가 정한다:
   - `지금 시간으론 멀어요` — 이 운전 시간 안에 해당 장소가 3곳 미만
-  - `조건에 맞는 곳이 적어요` — 조건 스위치를 켰을 때, 조건에 맞을 것으로 **추정**되는 곳이 3곳 미만. 추정은 서버 캐시에 있는 주차·요금 정보로 하고, 모르는 곳은 통과율(주차 0.7, 요금 0.95)로 센다. 추정이라 켜져 있어도 `/recommend` 가 `CONDITION_NOT_MET` 을 줄 수 있다
+  - `조건에 맞는 곳이 적어요` — 조건 카드를 켰을 때, 조건에 맞을 것으로 **추정**되는 곳이 3곳 미만. 추정은 서버 캐시에 있는 주차·요금 정보로 하고, 모르는 곳은 통과율(주차 0.7, 요금 0.95)로 센다. 추정이라 켜져 있어도 `/recommend` 가 `CONDITION_NOT_MET` 을 줄 수 있다
   - `일출은 HH:MM이에요` — 일출: 도착 예상이 일출 30분 전 ~ 일출 시각이 아님 (도착일의 일출, 좌표로 로컬 계산)
   - `일몰은 HH:MM이에요` — 노을: 도착 예상이 일몰 60분 전 ~ 20분 후가 아님
   - `HH:MM 이후 도착부터 볼 수 있어요` / `야경 안내는 23:00까지예요` — 야경: 일몰 30분 후 ~ 23:00
@@ -185,7 +185,7 @@ curl "$BASE/healthz"
 
 | 필드 | 타입 | 필수 | 설명 |
 |---|---|---|---|
-| `latitude` … `exclude_paid` | | | `/recommend` 와 같다. **첫 추천 때와 같은 값**을 보낸다(조건 스위치 포함) |
+| `latitude` … `exclude_paid` | | | `/recommend` 와 같다. **첫 추천 때와 같은 값**을 보낸다(조건 카드 포함) |
 | `content_id` | String | ✔ | 방금 ETA 를 잰 후보 (`reveal.content_id`) |
 | `observed_eta_seconds` | Int | ✔ | 그 후보까지 `requestTrip` ETA(초), 1~21600 |
 | `previous_content_ids` | List<String> | ✔ | 지금까지 나온 후보 전부(오래된 → 최근, 1~200개). **마지막 원소가 `content_id`** 여야 한다 |
@@ -198,12 +198,12 @@ curl "$BASE/healthz"
 | 넘음, `previous_content_ids` 가 3개 미만 | `retry` | `over_limit` | `null` | 새 추천 (`/recommend` 응답과 같은 형식) |
 | 넘음, 이미 3번째 후보 | `fallback` | `max_attempts` | `content_id` | `null` |
 | 넘음, 재추천할 곳이 없음 | `fallback` | `no_candidates` | `content_id` | `null` |
-| 넘음, 조건 스위치에 맞는 곳이 없음 | `fallback` | `condition_not_met` | `content_id` | `null` |
+| 넘음, 조건 카드에 맞는 곳이 없음 | `fallback` | `condition_not_met` | `content_id` | `null` |
 | 넘음, 고른 키워드를 이제 쓸 수 없음(예: 노을 시간이 지남) | `fallback` | `keyword_unavailable` | `content_id` | `null` |
 | 넘음, 재추천 중 관광 API 장애 | `fallback` | `upstream_error` | `content_id` | `null` |
 | 넘음, 재추천 중 서버 내부 오류 | `fallback` | `internal_error` | `content_id` | `null` |
 
-- 재추천은 `/recommend` 의 `retry_context` 경로를 서버 안에서 그대로 쓴다: 방금 후보의 실제 ETA 로 속도를 보정하고, `previous_content_ids`·`exclude_content_ids` 를 모두 빼고, 조건 스위치를 그대로 적용한다.
+- 재추천은 `/recommend` 의 `retry_context` 경로를 서버 안에서 그대로 쓴다: 방금 후보의 실제 ETA 로 속도를 보정하고, `previous_content_ids`·`exclude_content_ids` 를 모두 빼고, 조건 카드를 그대로 적용한다.
 - `attempt` = 안내할 후보(`accept`·`fallback`) 또는 새 추천(`retry`)이 몇 번째 추천인지. 로딩 화면의 "(2/3)" 표시에 그대로 쓴다.
 - 재추천이 실패해도(후보 없음, 조건 불충족, 키워드 시간 지남, 관광 API 장애, 내부 오류) 에러가 아니라 `fallback` 200 으로 온다. 서버 로그에는 원래 에러 코드가 남는다.
 - **에러로 오는 것은 요청 검증 오류(`INVALID_REQUEST`·`INVALID_LOCATION`·`INVALID_KEYWORD`, 400)뿐이다.** 앱 버그이므로 로그를 남기고 방금 후보로 안내한다. 그 밖에 앱이 따로 처리할 것은 네트워크 실패(연결 실패·타임아웃)뿐이다.
@@ -326,7 +326,7 @@ curl "$BASE/healthz"
 - 로딩 화면 전체 제한 시간 **12초** (실측 최악 7.2초 + 여유). 넘으면 그때까지 받은 마지막 추천으로 안내하고, 하나도 없으면 "잠시 후 다시 시도해 주세요".
 - `/recommend` 호출 1회 타임아웃 10초. 단 전체 12초 안에서 남은 시간을 넘지 않게 한다.
 - 로딩 연출은 캐시가 있어 금방 끝나도 **최소 1.5초** 보여 준다(뽑기 느낌 유지, 깜빡임 방지).
-- 조건 스위치를 켜면 요청 1회에 상세조회가 최대 10곳(5곳씩 2번 병렬)으로 늘어난다. 2026-11-13 프로토타입 측정(7곳, 30분, 두 조건 모두)에서 캐시 없음 p50 0.20초 / 최대 0.49초, 캐시 있음 수 ms였다. 위 제한 시간 12초는 그대로 둔다.
+- 조건 카드를 켜면 요청 1회에 상세조회가 최대 10곳(5곳씩 2번 병렬)으로 늘어난다. 2026-11-13 프로토타입 측정(7곳, 30분, 두 조건 모두)에서 캐시 없음 p50 0.20초 / 최대 0.49초, 캐시 있음 수 ms였다. 위 제한 시간 12초는 그대로 둔다.
 - 로딩 화면에는 "가까운 곳을 다시 찾는 중…"처럼 재추천 단계(1/3, 2/3…)를 보여 주면 대기가 덜 길게 느껴진다.
 
 ## 3. Kotlin (Gson + Retrofit)
@@ -490,9 +490,9 @@ val api = retrofit2.Retrofit.Builder()
 | `INVALID_REQUEST` | 400 | 형식 오류, `drive_minutes` 범위 밖, `available_minutes` 사용, `retry_context` 값 오류(`observed_eta_seconds` ≤ 0 등), `eta-check` 의 `content_id` 가 `previous_content_ids` 마지막이 아님 | `drive_minutes 는 15~120 사이여야 합니다` / `available_minutes는 drive_minutes(편도 운전 시간, 분)로 변경됐어요` | "요청을 처리하지 못했어요. 앱을 최신 버전으로 업데이트해 주세요." (앱 버그이므로 로그 수집) |
 | `INVALID_LOCATION` | 400 | 좌표 형식 오류, 대한민국 범위 밖 | `서비스 지역(대한민국) 밖의 좌표입니다` | "현재 위치를 확인할 수 없어요. 잠시 후 다시 시도해 주세요." (FusedLocation 재조회) |
 | `INVALID_KEYWORD` | 400 | 정의 안 된 키워드, 4개 이상, 중복 | `keyword_ids 는 정의된 키워드 중 중복 없이 0~3개여야 합니다` | "키워드를 다시 골라 주세요." |
-| `KEYWORD_UNAVAILABLE` | 400 | 고른 키워드가 **모두** 도착 시각에 쓸 수 없음(일출·노을·야경) | `고른 키워드를 도착 예상 시각에는 쓸 수 없어요` | "지금 출발하면 볼 수 없는 키워드예요. 다른 키워드를 골라 주세요." → `/keywords` 다시 호출해 칩 갱신 |
+| `KEYWORD_UNAVAILABLE` | 400 | 고른 키워드가 **모두** 도착 시각에 쓸 수 없음(일출·노을·야경) | `고른 키워드를 도착 예상 시각에는 쓸 수 없어요` | "지금 출발하면 볼 수 없는 키워드예요. 다른 키워드를 골라 주세요." → `/keywords` 다시 호출해 키워드 타일 갱신 |
 | `NO_CANDIDATES` | 404 | 조건에 맞는 장소 없음, 또는 모두 도착일 휴무, 또는 `exclude_content_ids` 로 다 빠짐 | `조건에 맞는 장소가 없어요` / `도착 예상 시각에 문을 여는 장소가 없어요` | "조건에 맞는 곳이 없어요. 운전 시간을 늘리거나 키워드를 바꿔 보세요." |
-| `CONDITION_NOT_MET` | 404 | (`/recommend`) `require_parking`·`exclude_paid` 를 켰는데 상세조회 상한(10곳) 안에서 통과한 곳이 없음 | `주차할 수 있는 곳을 찾지 못했어요` / `유료가 아닌 곳을 찾지 못했어요` / `주차할 수 있고 유료가 아닌 곳을 찾지 못했어요` (켠 조건에 따라) | "조건을 끄거나 운전 시간을 늘려 보세요." 스위치를 바로 끌 수 있게 키워드 화면으로 돌아간다. 자동 재추천 중이면 직전 결과로 안내 |
+| `CONDITION_NOT_MET` | 404 | (`/recommend`) `require_parking`·`exclude_paid` 를 켰는데 상세조회 상한(10곳) 안에서 통과한 곳이 없음 | `주차할 수 있는 곳을 찾지 못했어요` / `유료가 아닌 곳을 찾지 못했어요` / `주차할 수 있고 유료가 아닌 곳을 찾지 못했어요` (켠 조건에 따라) | "조건을 끄거나 운전 시간을 늘려 보세요." 조건 카드를 바로 끌 수 있게 풍경 화면으로 돌아간다. 자동 재추천 중이면 직전 결과로 안내 |
 | `UPSTREAM_TOUR_API_ERROR` | 502 | 관광 정보 서버 장애 + 서버 캐시 없음 | `관광 정보 서버에서 목록을 가져오지 못했습니다` | "장소 정보를 불러오지 못했어요. 잠시 후 다시 시도해 주세요." |
 | `INTERNAL_ERROR` | 500 | 서버 내부 오류 | `서버 내부 오류` | "잠시 후 다시 시도해 주세요." |
 | (네트워크 실패/타임아웃) | - | 서버 꺼짐, 주소 오류 등 | - | "서버에 연결할 수 없어요. 네트워크를 확인해 주세요." |
@@ -552,4 +552,4 @@ object Keyword {
   패키지명만 앱에 맞게 바꿔 복사한다.
 - `pick(recent)` 은 `recent` 에 없는 이름 중 하나를 무작위로 고른다(모두 최근이면 전체에서). 최근 10개 저장은 `TEAM_HANDOFF.md` 의 `RecentBlindNames`.
 - 목록 100개는 팀이 검수했고 서버 `config/alias_pool.yaml` 과 같다. 서버 테스트가 두 목록의 일치와 금지어(장소 유형어·지명·읍면동, 5~20자) 검증을 매번 검사한다. 목록을 바꿀 때는 두 파일을 함께 바꾼다.
-- 가명은 출발 전·주행 중 화면과 NaviHelper `poiName` 에 쓰고, 도감에는 그날 고른 가명을 저장한다.
+- 가명은 블라인드 티켓·도착 알림과 NaviHelper `poiName` 에 쓰고, 도감에는 그날 고른 가명을 저장한다.
