@@ -1,6 +1,6 @@
-# 어디가지? 추천 서버 API - team
+# 어디가지? 추천 서버 API 명세
 
-> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds`, 키워드 `sunrise`, 추천 조건 `require_parking`·`exclude_paid`, `POST /api/v1/eta-check` 추가, 2026-11-15 공통 헤더 `X-API-Key`). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
+> 버전 v0.1.0 (2026-11-15 기준). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
 
 ## 0. 한눈에 보기
 
