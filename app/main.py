@@ -1,6 +1,6 @@
 """어디가지? 추천 서버 (FastAPI).
 
-실행: uvicorn app.main:app --host 0.0.0.0 --port 8000
+실행: uvicorn app.main:app --host 127.0.0.1 --port 8000
 """
 from __future__ import annotations
 

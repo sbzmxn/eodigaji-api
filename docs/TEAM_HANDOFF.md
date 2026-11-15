@@ -107,7 +107,7 @@ withTimeoutOrNull(12_000) {                               // 전체 제한 12초
 - `baseRequest`에는 사용자가 켠 조건(`requireParking`, `excludePaid`)이 들어 있어야 합니다. `toEtaCheck`([`API_FOR_APP.md` 3장](API_FOR_APP.md#3-kotlin-gson--retrofit))가 같은 조건을 그대로 옮깁니다.
 - 호환용: 예전 방식(앱이 직접 비교하고 `/recommend`에 `retry_context`를 담아 재요청)도 그대로 동작합니다. 새 코드에서는 쓰지 않습니다.
 - `requestTrip`에도 `RouteInfo`를 넘긴다면 위와 같이 `poiName`은 가명, `address`는 빈 값으로 넘깁니다.
-- 앱 총 대기 시간 = 서버 시간(합계) + `requestTrip` 시간(최대 약 1초) × 횟수. 시연은 서버가 노트북 안(`10.0.2.2`)이라 네트워크 왕복은 0으로 봅니다.
+- 앱 총 대기 시간 = 서버 시간(합계) + `requestTrip` 시간(최대 약 1초) × 횟수. 여기에 앱 ↔ 서버 네트워크 왕복 시간이 더해집니다.
   3회 모두 돌 때: 상세 캐시 없음 p95 2.3 + 3 = 5.3초, 최악 4.2 + 3 = 7.2초 / 캐시 있음 약 3.2초. **전체 제한 12초**, 넘으면 마지막으로 받은 추천으로 안내합니다.
 
 ---
@@ -156,7 +156,7 @@ object RecentBlindNames {
 
 ### 서버 연결
 
-- 시연 때 서버는 노트북 안에서 돌고, 에뮬레이터는 `http://10.0.2.2:8000/` 으로 붙습니다(다른 환경이면 팀에서 공유한 주소). Retrofit `baseUrl` 끝에 `/`를 붙입니다.
+- 서버 주소는 각자 환경의 서버 주소를 씁니다(예: `BuildConfig.API_BASE_URL`). Retrofit `baseUrl` 끝에 `/`를 붙이고, 운영은 HTTPS 로 접속합니다.
 - 타임아웃: `/keywords` 5초, `/recommend` 10초(1회). 재추천 포함 로딩 화면 전체 12초.
 - 에러는 `{"error": {"code", "message", "request_id"}}` 형식입니다. 코드별 문구는 `API_FOR_APP.md` 4장을 보세요.
 - **API 키(`X-API-Key`)**: `/api/v1/` 아래 모든 요청에 헤더를 붙입니다(`/healthz` 는 필요 없음). 자세한 코드는 `API_FOR_APP.md` [3-1](API_FOR_APP.md#3-1-api-키-넣기-localproperties--buildconfig--okhttp-인터셉터).

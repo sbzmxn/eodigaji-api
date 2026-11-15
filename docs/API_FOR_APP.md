@@ -1,7 +1,6 @@
 # 어디가지? 추천 서버 API — 앱 팀용
 
 > 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds`, 키워드 `sunrise`, 추천 조건 `require_parking`·`exclude_paid`, `POST /api/v1/eta-check` 추가, 2026-11-15 공통 헤더 `X-API-Key`). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
-> 시연 때 서버는 노트북 안에서 돌고 에뮬레이터는 `http://10.0.2.2:8000/` 으로 붙는다. 다른 환경이면 외부 접속 주소로 `BASE` 를 바꿔 쓰면 된다.
 
 ## 0. 한눈에 보기
 
@@ -33,7 +32,7 @@
 - **한계: 앱에 넣은 키는 APK 에서 추출될 수 있어 '아무나 호출하지 못하게 하는 장치'이지 강한 인증이 아니다. 출시 시 HTTPS·요청 횟수 제한과 함께 쓴다.**
 
 ```bash
-BASE=http://localhost:8000          # 에뮬레이터에서는 http://10.0.2.2:8000
+BASE=http://localhost:8000
 KEY=<앱 API 키>                      # 개별로 전달받은 키. 문서·채팅에 붙여 넣지 않는다
 
 # 키워드 상태
@@ -318,7 +317,7 @@ curl "$BASE/healthz"
 
 ### 2-5. 로딩 시간과 타임아웃
 
-**앱 총 대기 시간 = 서버 시간(n회 합계) + `requestTrip` 시간 × n**. 추천 n회(1~3)면 `requestTrip` 도 n회다. `eta-check` 를 쓰면 서버 호출은 `/recommend` 1회 + `eta-check` n회인데, `accept`·`fallback` 은 수 ms, `retry` 는 `/recommend` 1회와 같은 시간이라 아래 표가 그대로 맞다. 시연에서는 서버가 같은 노트북에서 돌기 때문에(에뮬레이터 → `10.0.2.2`) 네트워크 왕복은 0으로 본다.
+**앱 총 대기 시간 = 서버 시간(n회 합계) + `requestTrip` 시간 × n**. 추천 n회(1~3)면 `requestTrip` 도 n회다. `eta-check` 를 쓰면 서버 호출은 `/recommend` 1회 + `eta-check` n회인데, `accept`·`fallback` 은 수 ms, `retry` 는 `/recommend` 1회와 같은 시간이라 아래 표가 그대로 맞다. 아래 시간에는 앱 ↔ 서버 네트워크 왕복이 들어 있지 않으니, 각자 환경의 서버 주소까지 왕복 시간을 더해서 본다.
 
 서버 시간(2026-11-13 실측, 7곳 × 30·60분, 프로세스 내, 네트워크 제외):
 
@@ -485,6 +484,7 @@ fun <T> Response<T>.apiError(gson: com.google.gson.Gson): ErrorBody? =
 ```properties
 # local.properties (git 제외)
 app_api_key=<개별로 전달받은 키>
+api_base_url=<각자 환경의 서버 주소, 끝에 />
 ```
 
 ```kotlin
@@ -500,6 +500,7 @@ android {
     buildFeatures { buildConfig = true }
     defaultConfig {
         buildConfigField("String", "APP_API_KEY", "\"${localProps.getProperty("app_api_key", "")}\"")
+        buildConfigField("String", "API_BASE_URL", "\"${localProps.getProperty("api_base_url", "")}\"")
     }
 }
 ```
@@ -518,7 +519,7 @@ class ApiKeyInterceptor(private val key: String) : okhttp3.Interceptor {
 ```kotlin
 // Retrofit 생성 예
 val api = retrofit2.Retrofit.Builder()
-    .baseUrl("http://10.0.2.2:8000/")             // 에뮬레이터 → 노트북 서버. 끝에 / 필수 (http 면 cleartext 허용 필요)
+    .baseUrl(BuildConfig.API_BASE_URL)            // 서버 주소. 끝에 / 필수. 운영은 HTTPS
     .addConverterFactory(retrofit2.converter.gson.GsonConverterFactory.create())
     .client(okhttp3.OkHttpClient.Builder()
         .addInterceptor(ApiKeyInterceptor(BuildConfig.APP_API_KEY))

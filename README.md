@@ -11,8 +11,8 @@
 | `app/` | 서버 코드 (API, 추천 흐름, 관광 API 클라이언트, 점수·일몰·가명·캐시) |
 | `config/` | 튜닝 값: `settings.yaml`(반경·점수·시간 구간·섬 규칙), `keywords.yaml`(키워드↔관광 분류), `alias_pool.yaml`(검수된 가명 100개), `alias.yaml`(가명 금지어 규칙) |
 | `tests/` | 단위 테스트(mock), 실제 API 통합 테스트(`-m integration`), 테스트 데이터(출발 좌표 7곳 등) |
-| `scripts/` | `demo_call.sh`(시연 호출), `check_locations.py`(7곳 점검), `warmup.py`(시연 전 캐시 예열), `measure_speed.py`(속도 측정), `generate_alias_pool.py`(가명 후보 일회성 생성, Ollama 필요) |
-| `docs/` | `API_FOR_APP.md`(앱 팀용 API 명세), `BlindNames.kt`(앱용 가명 100개), `TEAM_HANDOFF.md`(영역별 연동 안내), `GIT_GUIDE.md`(저장소 사용법), `EVALUATION.md`(평가 결과) |
+| `scripts/` | `demo_call.sh`(예시 호출), `check_locations.py`(7곳 점검), `warmup.py`(사용 전 캐시 예열), `measure_speed.py`(속도 측정), `generate_alias_pool.py`(가명 후보 일회성 생성, Ollama 필요) |
+| `docs/` | `API_FOR_APP.md`(앱 팀용 API 명세), `BlindNames.kt`(앱용 가명 100개), `TEAM_HANDOFF.md`(영역별 연동 안내), `EVALUATION.md`(평가 결과) |
 
 ## 빠른 시작
 
@@ -22,8 +22,10 @@
 python3.10 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                 # 키 입력 (아래)
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+외부에서 접속해야 하면 서버를 직접 열지 말고 HTTPS 리버스 프록시 뒤에 둡니다.
 
 처음 기동할 때 전국 관광지 목록을 받아(관광 API 3회, 수 초) `data/cache/` 에 하루 동안 캐시합니다. `GET /healthz` 의 `index_spots` 가 0보다 크면 준비된 것입니다.
 
@@ -89,11 +91,11 @@ python scripts/generate_alias_pool.py --model qwen2.5:7b   # 가명 후보 생�
 
 `reports/` 와 `data/` 는 실행 시 자동으로 만들어지며 git 에서 제외됩니다.
 
-## 시연 전 캐시 예열 (`scripts/warmup.py`)
+## 서비스 시작 전 캐시 예열 (`scripts/warmup.py`)
 
-시연 출발지 주변의 상세·요금 정보를 미리 받아 두면 시연 중 관광 API 호출과 대기 시간이 거의 없어집니다.
+자주 쓰는 출발지 주변의 상세·요금 정보를 미리 받아 두면 사용 중 관광 API 호출과 대기 시간이 거의 없어집니다.
 출발지 × 운전시간 × 키워드(없음 + 9개) 조합마다 1차 점수 상위 10곳을 조회합니다(곳당 최대 3회, 이미 캐시된 곳은 건너뜀).
-캐시에 소개글이 있는 곳은 1차 점수 가산을 받으므로 예열한 곳이 시연 때 먼저 뽑힙니다.
+캐시에 소개글이 있는 곳은 1차 점수 가산을 받으므로 예열한 곳이 먼저 뽑힙니다.
 
 ```bash
 # 1) 호출 없이 대상 수·예상 호출 수 확인
@@ -103,7 +105,7 @@ python scripts/warmup.py --origin 37.4979,127.0276 --drives 30,60 --max-calls 30
 ```
 
 - 출발지 1곳 × 운전시간 1개에 보통 300회 이하입니다. 상한에 닿으면 멈추고, 다음 날 같은 명령으로 이어서 실행하면 남은 곳만 받습니다.
-- 상세 캐시는 7일 유지되므로 **시연 1~2일 전**에 나눠 돌립니다. 시연 당일은 한도를 비워 둡니다.
+- 상세 캐시는 7일 유지되므로 **서비스 시작 1~2일 전**에 나눠 돌립니다. 서비스 당일은 한도를 비워 둡니다.
 - `--origin` 은 여러 번 줄 수 있고, `--keywords none,forest,walk` 로 조합을 줄일 수 있습니다.
 
 ## 평가 결과
