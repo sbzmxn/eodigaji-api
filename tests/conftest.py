@@ -28,6 +28,7 @@ NOW = datetime(2026, 11, 11, 14, 0, tzinfo=KST)
 def settings(tmp_path):
     s = load_settings(env_file=None)
     s.cache.dir = str(tmp_path / "cache")
+    s.app_api_keys = []   # 셸에 APP_API_KEYS 가 있어도 기본은 검사 꺼짐
     return s
 
 

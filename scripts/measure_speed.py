@@ -96,7 +96,8 @@ def main():
                         s.cache.dir = str(d)
                         s.random_seed = i * 1000 + drive
                         app = create_app(s)
-                        with TestClient(app) as c:
+                        hdr = {"X-API-Key": s.app_api_keys[0].get_secret_value()} if s.app_api_keys else {}
+                        with TestClient(app, headers=hdr) as c:
                             times, codes = run_chain(c, loc, drive)
                         api[phase] += app.state.index.tour.calls      # 시작 시 목록 갱신 호출까지 포함
                         per_call[phase] += times

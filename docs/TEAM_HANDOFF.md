@@ -159,3 +159,8 @@ object RecentBlindNames {
 - 시연 때 서버는 노트북 안에서 돌고, 에뮬레이터는 `http://10.0.2.2:8000/` 으로 붙습니다(다른 환경이면 팀에서 공유한 주소). Retrofit `baseUrl` 끝에 `/`를 붙입니다.
 - 타임아웃: `/keywords` 5초, `/recommend` 10초(1회). 재추천 포함 로딩 화면 전체 12초.
 - 에러는 `{"error": {"code", "message", "request_id"}}` 형식입니다. 코드별 문구는 `API_FOR_APP.md` 4장을 보세요.
+- **API 키(`X-API-Key`)**: `/api/v1/` 아래 모든 요청에 헤더를 붙입니다(`/healthz` 는 필요 없음). 자세한 코드는 `API_FOR_APP.md` [3-1](API_FOR_APP.md#3-1-api-키-넣기-localproperties--buildconfig--okhttp-인터셉터).
+  1. 서버 담당에게 키를 개별로 받아 `local.properties` 에 `app_api_key=...` 로 넣습니다(**git 에 올리지 않음**, 단톡에 올리지 않음).
+  2. `build.gradle` 에서 `BuildConfig.APP_API_KEY` 로 읽고, OkHttp 인터셉터 하나로 모든 요청에 `X-API-Key` 를 붙입니다. 로그 인터셉터를 쓰면 `redactHeader("X-API-Key")`.
+  3. 401 `UNAUTHORIZED` 는 앱 버그로 보고 로그를 모으고, 사용자에게는 "서버 인증에 실패했어요. 앱을 최신 버전으로 업데이트해 주세요."를 보여 줍니다.
+  - 한계: 앱에 넣은 키는 APK 에서 추출될 수 있어 '아무나 호출하지 못하게 하는 장치'이지 강한 인증이 아닙니다. 출시 시 HTTPS·요청 횟수 제한과 함께 씁니다.

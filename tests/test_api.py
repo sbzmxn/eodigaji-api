@@ -679,4 +679,6 @@ def test_eta_check_fallback_reasons_cover_retry_errors():
     from app.schemas import ERROR_CODES, EtaCheckResponse
     allowed = set(EtaCheckResponse.model_fields["reason"].annotation.__args__)
     assert set(RETRY_FALLBACK_REASONS.values()) <= allowed
-    assert {c for c in ERROR_CODES if not c.startswith("INVALID_")} == set(RETRY_FALLBACK_REASONS)
+    # UNAUTHORIZED 는 요청 단계(미들웨어)에서만 나고 재추천 중에는 생기지 않는다
+    retry_codes = {c for c in ERROR_CODES if not c.startswith("INVALID_") and c != "UNAUTHORIZED"}
+    assert retry_codes == set(RETRY_FALLBACK_REASONS)

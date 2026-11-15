@@ -30,7 +30,9 @@ def main():
     app = create_app()
     rec = app.state.recommender
     rows, fails = [], []
-    with TestClient(app) as c:
+    keys = rec.s.app_api_keys   # 검사가 켜져 있으면 첫 번째 키를 붙인다 (프로세스 안 호출이어도 미들웨어를 지남)
+    headers = {"X-API-Key": keys[0].get_secret_value()} if keys else {}
+    with TestClient(app, headers=headers) as c:
         kw_ids = rec.s.keywords.ids
         calls0 = rec.index.tour.calls if getattr(rec.index, "tour", None) else 0
         for loc in LOCATIONS:

@@ -181,6 +181,8 @@ class Settings(BaseModel):
     bounds: BoundsCfg = Field(default_factory=BoundsCfg)
     keywords: KeywordsCfg
     tour_kor_key: SecretStr = SecretStr("")
+    # 앱 → 서버 API 키 (X-API-Key). 비어 있으면 검사하지 않는다. 여러 개는 키 교체용
+    app_api_keys: list[SecretStr] = Field(default_factory=list)
 
     @property
     def cache_dir(self) -> Path:
@@ -218,7 +220,13 @@ def load_settings(config_dir: Path = CONFIG_DIR, env_file: Optional[Path] = ROOT
     alias["pool"] = (_read_yaml(config_dir / "alias_pool.yaml").get("names") or [])
     env = read_env_file(env_file) if env_file else {}
     raw["tour_kor_key"] = os.environ.get("TOURAPI_KOR_KEY") or env.get("TOURAPI_KOR_KEY", "")
+    raw["app_api_keys"] = parse_api_keys(os.environ.get("APP_API_KEYS") or env.get("APP_API_KEYS", ""))
     return Settings.model_validate(raw)
+
+
+def parse_api_keys(value: str) -> list[SecretStr]:
+    """쉼표로 나눈 키 목록. 앞뒤 공백·빈 항목은 버린다."""
+    return [SecretStr(k.strip()) for k in (value or "").split(",") if k.strip()]
 
 
 @lru_cache(maxsize=1)

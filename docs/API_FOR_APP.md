@@ -1,6 +1,6 @@
 # 어디가지? 추천 서버 API — 앱 팀용
 
-> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds`, 키워드 `sunrise`, 추천 조건 `require_parking`·`exclude_paid`, `POST /api/v1/eta-check` 추가). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
+> 기준: 서버 `app/schemas.py`(Pydantic) v0.1.0, 2026-11-13 (재추천 `retry_context`, `straight_km`, `estimated_drive_seconds`, 키워드 `sunrise`, 추천 조건 `require_parking`·`exclude_paid`, `POST /api/v1/eta-check` 추가, 2026-11-15 공통 헤더 `X-API-Key`). 아래 JSON 예시는 실제 서버 응답을 그대로 옮긴 것이다(request_id 등 값만 다름).
 > 시연 때 서버는 노트북 안에서 돌고 에뮬레이터는 `http://10.0.2.2:8000/` 으로 붙는다. 다른 환경이면 외부 접속 주소로 `BASE` 를 바꿔 쓰면 된다.
 
 ## 0. 한눈에 보기
@@ -16,25 +16,38 @@
 - 시간 입력은 **목적지까지 편도 운전 시간** `drive_minutes` (15~120분). 예전 `available_minutes` 는 폐기됐다(보내면 400).
 - **가명은 앱 `BlindNames`([`BlindNames.kt`](BlindNames.kt))에서 고른다. 서버 응답의 `blind_name` 은 쓰지 않아도 된다.** (호환을 위해 당분간 같은 100개 목록에서 고른 값을 내려준다.)
 - 서버는 좌표를 저장·로그하지 않는다. 사용자 식별자는 보내지 않는다.
+- **모든 `/api/v1/` 요청에 헤더 `X-API-Key: <앱 API 키>` 를 붙인다**(OkHttp 인터셉터로 한 곳에서, [3](#3-kotlin-gson--retrofit)). 없거나 틀리면 401 `UNAUTHORIZED`. `/healthz` 는 키 없이 된다.
 - 타임아웃 권장: `/keywords` 5초, `/recommend` 10초(호출 1회). 재추천을 포함한 로딩 화면 전체는 **12초** ([2-5](#2-5-로딩-시간과-타임아웃)).
 
 ## 1. 엔드포인트와 curl
 
+### 공통 헤더 `X-API-Key`
+
+| 헤더 | 값 | 대상 |
+|---|---|---|
+| `X-API-Key` | 서버 `.env` 의 `APP_API_KEYS` 에 등록된 키 중 하나 (개별로 전달받음) | `/api/v1/` 아래 모든 요청 (`keywords`·`recommend`·`eta-check`). `/healthz` 는 필요 없음 |
+
+- 키가 없거나 틀리면 **401 `UNAUTHORIZED`** ([4. 에러](#4-에러)). 없는 경우와 틀린 경우를 구분해 알려 주지 않는다.
+- 서버에 키가 등록돼 있지 않으면(로컬 개발) 검사하지 않는다. 이때만 `/docs`(Swagger)가 열린다. 키 검사가 켜진 서버에서는 `/docs`·`/openapi.json` 이 꺼져 있으니 이 문서를 기준으로 한다.
+- 키는 교체할 때 서버가 옛 키·새 키를 잠시 함께 받는다. 앱은 키 하나만 넣으면 된다.
+- **한계: 앱에 넣은 키는 APK 에서 추출될 수 있어 '아무나 호출하지 못하게 하는 장치'이지 강한 인증이 아니다. 출시 시 HTTPS·요청 횟수 제한과 함께 쓴다.**
+
 ```bash
 BASE=http://localhost:8000          # 에뮬레이터에서는 http://10.0.2.2:8000
+KEY=<앱 API 키>                      # 개별로 전달받은 키. 문서·채팅에 붙여 넣지 않는다
 
 # 키워드 상태
-curl "$BASE/api/v1/keywords?lat=37.4979&lng=127.0276&drive_minutes=30"
+curl -H "X-API-Key: $KEY" "$BASE/api/v1/keywords?lat=37.4979&lng=127.0276&drive_minutes=30"
 
 # 추천
-curl -X POST "$BASE/api/v1/recommend" -H 'Content-Type: application/json' \
+curl -X POST "$BASE/api/v1/recommend" -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
   -d '{"latitude":37.4979,"longitude":127.0276,"drive_minutes":30,"keyword_ids":["forest","walk"],"exclude_content_ids":[]}'
 
 # ETA 판단 (requestTrip 으로 잰 ETA 를 보냄)
-curl -X POST "$BASE/api/v1/eta-check" -H 'Content-Type: application/json' \
+curl -X POST "$BASE/api/v1/eta-check" -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
   -d '{"latitude":37.4979,"longitude":127.0276,"drive_minutes":30,"keyword_ids":["forest","walk"],"content_id":"3352052","observed_eta_seconds":2160,"previous_content_ids":["3352052"]}'
 
-# 서버 상태 (관광지 인덱스 적재 여부)
+# 서버 상태 (관광지 인덱스 적재 여부). 키 필요 없음
 curl "$BASE/healthz"
 ```
 
@@ -206,7 +219,7 @@ curl "$BASE/healthz"
 - 재추천은 `/recommend` 의 `retry_context` 경로를 서버 안에서 그대로 쓴다: 방금 후보의 실제 ETA 로 속도를 보정하고, `previous_content_ids`·`exclude_content_ids` 를 모두 빼고, 조건 카드를 그대로 적용한다.
 - `attempt` = 안내할 후보(`accept`·`fallback`) 또는 새 추천(`retry`)이 몇 번째 추천인지. 로딩 화면의 "(2/3)" 표시에 그대로 쓴다.
 - 재추천이 실패해도(후보 없음, 조건 불충족, 키워드 시간 지남, 관광 API 장애, 내부 오류) 에러가 아니라 `fallback` 200 으로 온다. 서버 로그에는 원래 에러 코드가 남는다.
-- **에러로 오는 것은 요청 검증 오류(`INVALID_REQUEST`·`INVALID_LOCATION`·`INVALID_KEYWORD`, 400)뿐이다.** 앱 버그이므로 로그를 남기고 방금 후보로 안내한다. 그 밖에 앱이 따로 처리할 것은 네트워크 실패(연결 실패·타임아웃)뿐이다.
+- **에러로 오는 것은 요청 검증 오류(`INVALID_REQUEST`·`INVALID_LOCATION`·`INVALID_KEYWORD`, 400)와 API 키 오류(`UNAUTHORIZED`, 401)뿐이다.** 둘 다 앱 버그이므로 로그를 남기고 방금 후보로 안내한다. 그 밖에 앱이 따로 처리할 것은 네트워크 실패(연결 실패·타임아웃)뿐이다.
 - 입력 오류(`INVALID_REQUEST`): `content_id` 가 `previous_content_ids` 의 마지막이 아님, `observed_eta_seconds` ≤ 0, 필드 누락. 위치·운전시간·키워드 검증은 `/recommend` 와 같다(`accept` 일 때도 검사).
 - 서버 로그에는 request_id, content_id, ETA, 판단만 남고 좌표는 남지 않는다.
 
@@ -465,12 +478,50 @@ fun <T> Response<T>.apiError(gson: com.google.gson.Gson): ErrorBody? =
     errorBody()?.charStream()?.use { runCatching { gson.fromJson(it, ErrorResponse::class.java).error }.getOrNull() }
 ```
 
+### 3-1. API 키 넣기 (`local.properties` → `BuildConfig` → OkHttp 인터셉터)
+
+키는 코드·`build.gradle` 에 직접 쓰지 않고 `local.properties` 에 둔다. **`local.properties` 는 git 에 올리지 않는다**(Android 기본 `.gitignore` 에 들어 있는지 확인). 키는 단톡방이 아니라 개별로 전달받는다.
+
+```properties
+# local.properties (git 제외)
+app_api_key=<개별로 전달받은 키>
+```
+
+```kotlin
+// app/build.gradle.kts
+import java.util.Properties
+
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
+android {
+    buildFeatures { buildConfig = true }
+    defaultConfig {
+        buildConfigField("String", "APP_API_KEY", "\"${localProps.getProperty("app_api_key", "")}\"")
+    }
+}
+```
+
+```kotlin
+// 모든 요청에 X-API-Key 를 붙이는 인터셉터 (라우트마다 넣지 않는다)
+class ApiKeyInterceptor(private val key: String) : okhttp3.Interceptor {
+    override fun intercept(chain: okhttp3.Interceptor.Chain): okhttp3.Response =
+        chain.proceed(chain.request().newBuilder().header("X-API-Key", key).build())
+}
+```
+
+- 키를 로그·크래시 리포트에 찍지 않는다. `HttpLoggingInterceptor` 를 쓰면 `redactHeader("X-API-Key")` 를 건다.
+- `BuildConfig.APP_API_KEY` 가 빈 값이면 빌드 설정 누락이다(서버가 검사를 켜 두었다면 모든 요청이 401).
+
 ```kotlin
 // Retrofit 생성 예
 val api = retrofit2.Retrofit.Builder()
     .baseUrl("http://10.0.2.2:8000/")             // 에뮬레이터 → 노트북 서버. 끝에 / 필수 (http 면 cleartext 허용 필요)
     .addConverterFactory(retrofit2.converter.gson.GsonConverterFactory.create())
     .client(okhttp3.OkHttpClient.Builder()
+        .addInterceptor(ApiKeyInterceptor(BuildConfig.APP_API_KEY))
         .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
         .build())
     .build()
@@ -488,6 +539,7 @@ val api = retrofit2.Retrofit.Builder()
 | code | HTTP | 언제 | 서버 message (실제) | 앱 문구 제안 / 처리 |
 |---|---|---|---|---|
 | `INVALID_REQUEST` | 400 | 형식 오류, `drive_minutes` 범위 밖, `available_minutes` 사용, `retry_context` 값 오류(`observed_eta_seconds` ≤ 0 등), `eta-check` 의 `content_id` 가 `previous_content_ids` 마지막이 아님 | `drive_minutes 는 15~120 사이여야 합니다` / `available_minutes는 drive_minutes(편도 운전 시간, 분)로 변경됐어요` | "요청을 처리하지 못했어요. 앱을 최신 버전으로 업데이트해 주세요." (앱 버그이므로 로그 수집) |
+| `UNAUTHORIZED` | 401 | `X-API-Key` 헤더가 없거나 등록된 키가 아님 (모든 `/api/v1/` 엔드포인트) | `API 키가 없거나 올바르지 않아요` | "서버 인증에 실패했어요. 앱을 최신 버전으로 업데이트해 주세요." (앱 버그로 로그 수집. 키 값은 로그에 넣지 않는다) |
 | `INVALID_LOCATION` | 400 | 좌표 형식 오류, 대한민국 범위 밖 | `서비스 지역(대한민국) 밖의 좌표입니다` | "현재 위치를 확인할 수 없어요. 잠시 후 다시 시도해 주세요." (FusedLocation 재조회) |
 | `INVALID_KEYWORD` | 400 | 정의 안 된 키워드, 4개 이상, 중복 | `keyword_ids 는 정의된 키워드 중 중복 없이 0~3개여야 합니다` | "키워드를 다시 골라 주세요." |
 | `KEYWORD_UNAVAILABLE` | 400 | 고른 키워드가 **모두** 도착 시각에 쓸 수 없음(일출·노을·야경) | `고른 키워드를 도착 예상 시각에는 쓸 수 없어요` | "지금 출발하면 볼 수 없는 키워드예요. 다른 키워드를 골라 주세요." → `/keywords` 다시 호출해 키워드 타일 갱신 |

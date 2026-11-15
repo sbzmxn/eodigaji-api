@@ -39,9 +39,19 @@ scripts/demo_call.sh 37.4979 127.0276 30 forest,walk
 
 ```
 TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정보 서비스_GW' Decoding 키
+APP_API_KEYS=      # 앱 → 서버 API 키(요청 헤더 X-API-Key). 쉼표로 여러 개
 ```
 
 키는 로그·에러 메시지에서 마스킹되며 `.env` 는 git 에서 제외됩니다.
+
+### 앱 API 키 (`APP_API_KEYS`)
+
+- 키 만들기(32자 이상): `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+- **값이 있으면 검사 켜짐**: `/api/v1/` 아래 모든 요청에 `X-API-Key` 가 등록된 키 중 하나와 같아야 합니다(없거나 틀리면 401 `UNAUTHORIZED`). `/healthz` 는 키 없이 되고, `/docs`·`/redoc`·`/openapi.json` 은 꺼집니다.
+- **비어 있으면 검사 꺼짐**(로컬 개발용): 시작할 때 `APP_API_KEYS 가 비어 있어 API 키 검사를 하지 않습니다` 경고를 한 번 남기고, `/docs` 가 열립니다.
+- 키가 하나라도 32자 미만이면 서버가 시작하지 않고 몇 번째 키인지 로그에 남깁니다(키 값은 남기지 않음).
+- 키 교체: `APP_API_KEYS=<새 키>,<옛 키>` 로 둘 다 받다가 앱이 모두 새 키로 바뀌면 옛 키를 지웁니다.
+- 환경변수 `APP_API_KEYS` 가 있으면 `.env` 보다 우선합니다. `scripts/demo_call.sh`·`check_locations.py`·`measure_speed.py` 는 첫 번째 키를 헤더에 붙입니다.
 
 ## API 요약
 
@@ -59,7 +69,7 @@ TOURAPI_KOR_KEY=   # 공공데이터포털 '한국관광공사_국문 관광정�
 
 - 키워드 id: `sea` 바다, `water` 호수·강, `forest` 숲, `walk` 산책, `view` 전망, `quiet` 고즈넉, `sunrise` 일출, `sunset` 노을, `night` 야경 (0~3개).
 - 에러는 `{"error": {"code", "message", "request_id"}}` 형식입니다.
-  코드: `INVALID_REQUEST`, `INVALID_LOCATION`, `INVALID_KEYWORD`, `KEYWORD_UNAVAILABLE`, `NO_CANDIDATES`, `CONDITION_NOT_MET`, `UPSTREAM_TOUR_API_ERROR`, `INTERNAL_ERROR`.
+  코드: `UNAUTHORIZED`(401, `X-API-Key` 없음·틀림), `INVALID_REQUEST`, `INVALID_LOCATION`, `INVALID_KEYWORD`, `KEYWORD_UNAVAILABLE`, `NO_CANDIDATES`, `CONDITION_NOT_MET`, `UPSTREAM_TOUR_API_ERROR`, `INTERNAL_ERROR`.
 - 조건: `"require_parking": true` 면 주차 '가능'으로 확인된 곳만, `"exclude_paid": true` 면 '유료' 제외(무료·정보 없음 포함). 점수 상위부터 5곳씩, 요청당 최대 10곳 상세조회. 못 찾으면 `CONDITION_NOT_MET`(404). `/keywords` 도 같은 쿼리를 받아 캐시 기반 추정으로 키워드 타일을 끈다.
 - 자동 재추천: 앱은 `requestTrip` ETA 를 `POST /api/v1/eta-check` 에 보내고 `decision` 만 따른다. 서버가 시간 비교·횟수(최대 3회)·재추천(속도 보정 + 이전 후보 제외)을 맡는다. 예전 `/recommend` 의 `retry_context` 방식도 호환용으로 동작한다. 보정값은 저장하지 않는다.
 - 서버는 사용자 좌표를 저장·로그하지 않고, 관광 API 로도 보내지 않습니다.

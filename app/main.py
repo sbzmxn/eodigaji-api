@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import random
 import time
@@ -28,6 +29,38 @@ from .tour_client import TourClient
 
 log = logging.getLogger("eodigaji")
 RENAMED_MSG = "available_minutes는 drive_minutes(편도 운전 시간, 분)로 변경됐어요"
+API_KEY_HEADER = "X-API-Key"
+API_KEY_MIN_LEN = 32
+UNAUTHORIZED_MSG = "API 키가 없거나 올바르지 않아요"   # 없음/틀림을 구분하지 않는다
+PROTECTED_PREFIX = "/api/"
+
+
+class ApiKeyConfigError(RuntimeError):
+    """APP_API_KEYS 설정이 잘못돼 서버를 시작하지 않는다 (메시지에 키 값은 넣지 않는다)."""
+
+
+def load_api_keys(s: Settings) -> list[bytes]:
+    """검사에 쓸 키 목록. 비어 있으면 검사를 끄고 경고, 짧은 키가 있으면 시작을 거부한다."""
+    keys = [k.get_secret_value() for k in s.app_api_keys]
+    if not keys:
+        log.warning("APP_API_KEYS 가 비어 있어 API 키 검사를 하지 않습니다")
+        return []
+    short = [str(i) for i, k in enumerate(keys, 1) if len(k) < API_KEY_MIN_LEN]
+    if short:
+        msg = (f"APP_API_KEYS 의 {','.join(short)}번째 키가 {API_KEY_MIN_LEN}자 미만이라 서버를 시작하지 않습니다 "
+               '(만들기: python -c "import secrets; print(secrets.token_urlsafe(32))")')
+        log.error(msg)
+        raise ApiKeyConfigError(msg)
+    return [k.encode("utf-8") for k in keys]
+
+
+def api_key_ok(given: Optional[str], keys: list[bytes]) -> bool:
+    """등록된 모든 키와 hmac.compare_digest 로 비교한다 (일찍 끝내지 않아 시간으로 구분되지 않게)."""
+    g = (given or "").encode("utf-8")
+    ok = False
+    for k in keys:
+        ok |= hmac.compare_digest(g, k)
+    return ok
 
 
 # ---- 로깅: 좌표·쿼리·키가 남지 않게 ----------------------------------------
@@ -80,6 +113,7 @@ def create_app(
     alias.check()   # 기본 금지어로 가명 목록 검사. 걸리면 AliasPoolError (앱을 만들지 않음)
     rec = Recommender(s, index, details, alias, now_fn=now_fn, rng=rng)
     sink = sink or LogSink()
+    api_keys = load_api_keys(s)   # 잘못된 설정이면 여기서 ApiKeyConfigError (앱을 만들지 않음)
 
     async def warm_up() -> None:
         """참조 데이터·인덱스를 받고, 넓힌 금지어(신분류·시군구·읍면동)로 가명 목록을 다시 검사한다.
@@ -117,7 +151,9 @@ def create_app(
         if tour:
             await tour.aclose()
 
-    app = FastAPI(title="어디가지? 추천 서버", version="0.1.0", lifespan=lifespan)
+    # 키 검사가 켜져 있으면 /docs·/redoc·/openapi.json 을 끈다 (계약은 docs/API_FOR_APP.md).
+    docs = {} if not api_keys else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    app = FastAPI(title="어디가지? 추천 서버", version="0.1.0", lifespan=lifespan, **docs)
     app.state.recommender = rec
     app.state.index = index
 
@@ -127,7 +163,14 @@ def create_app(
         request.state.meta = RequestMeta(request_id=rid, endpoint=request.url.path)
         t0 = time.perf_counter()
         try:
-            response = await call_next(request)
+            if api_keys and request.url.path.startswith(PROTECTED_PREFIX) \
+                    and not api_key_ok(request.headers.get(API_KEY_HEADER), api_keys):
+                # 키 값은 남기지 않는다: request_id 와 경로만
+                log.warning("unauthorized rid=%s path=%s", rid, request.url.path)
+                request.state.meta.result_code = "UNAUTHORIZED"
+                response = _error("UNAUTHORIZED", UNAUTHORIZED_MSG, rid)
+            else:
+                response = await call_next(request)
         except Exception as exc:  # noqa: BLE001  내부 오류도 같은 에러 스키마 + 요청 로그로
             log.error("unhandled %s rid=%s", type(exc).__name__, rid)
             request.state.meta.result_code = "INTERNAL_ERROR"
