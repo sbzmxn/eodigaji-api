@@ -11,8 +11,8 @@
 | `app/` | 서버 코드 (API, 추천 흐름, 관광 API 클라이언트, 점수·일몰·가명·캐시) |
 | `config/` | 튜닝 값: `settings.yaml`(반경·점수·시간 구간·섬 규칙), `keywords.yaml`(키워드↔관광 분류), `alias_pool.yaml`(검수된 가명 100개), `alias.yaml`(가명 금지어 규칙) |
 | `tests/` | 단위 테스트(mock), 실제 API 통합 테스트(`-m integration`), 테스트 데이터(출발 좌표 7곳 등) |
-| `scripts/` | `demo_call.sh`(예시 호출), `check_locations.py`(7곳 점검), `warmup.py`(사용 전 캐시 예열), `measure_speed.py`(속도 측정), `generate_alias_pool.py`(가명 후보 일회성 생성, Ollama 필요) |
-| `docs/` | `API_FOR_APP.md`(앱 팀용 API 명세), `BlindNames.kt`(앱용 가명 100개), `TEAM_HANDOFF.md`(영역별 연동 안내), `EVALUATION.md`(평가 결과) |
+| `scripts/` | `check_locations.py`(7곳 점검), `warmup.py`(사용 전 캐시 예열), `measure_speed.py`(속도 측정), `generate_alias_pool.py`(가명 후보 일회성 생성, Ollama 필요) |
+| `docs/` | `API_FOR_APP.md`(앱용 API 명세), `EVALUATION.md`(평가 결과) |
 
 ## 빠른 시작
 
@@ -30,11 +30,14 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 처음 기동할 때 전국 관광지 목록을 받아(관광 API 3회, 수 초) `data/cache/` 에 하루 동안 캐시합니다. `GET /healthz` 의 `index_spots` 가 0보다 크면 준비된 것입니다.
 
 ```bash
-# 좌표는 항상 인자로: <위도> <경도> <drive_minutes 15~120> [keyword_ids]
-scripts/demo_call.sh 37.4979 127.0276 30 forest,walk
+# 호출 예시. APP_API_KEYS 를 설정했으면 그중 하나를 KEY 에 (비워 두면 헤더 없이도 됨)
+KEY=<앱 API 키>
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8000/api/v1/keywords?lat=37.4979&lng=127.0276&drive_minutes=30"
+curl -X POST "http://127.0.0.1:8000/api/v1/recommend" -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"latitude":37.4979,"longitude":127.0276,"drive_minutes":30,"keyword_ids":["forest","walk"],"exclude_content_ids":[]}'
 ```
 
-가명은 팀이 검수한 100개 목록(`config/alias_pool.yaml`)에서 고릅니다. 앱은 같은 목록을 [`docs/BlindNames.kt`](docs/BlindNames.kt)로 직접 쓰며, 서버 응답의 `blind_name` 은 호환용입니다.
+가명은 팀이 검수한 100개 목록(`config/alias_pool.yaml`)에서 고릅니다. 앱은 같은 목록을 앱 안에 두고 직접 고르며, 서버 응답의 `blind_name` 은 호환용입니다.
 서버는 시작할 때 목록 전체를 금지어(장소 유형어·지명·읍면동 등)로 검사하고, 하나라도 걸리면 그 이름을 로그에 남기고 시작하지 않습니다.
 
 ## .env 설정
@@ -53,7 +56,7 @@ APP_API_KEYS=      # 앱 → 서버 API 키(요청 헤더 X-API-Key). 쉼표로 
 - **비어 있으면 검사 꺼짐**(로컬 개발용): 시작할 때 `APP_API_KEYS 가 비어 있어 API 키 검사를 하지 않습니다` 경고를 한 번 남기고, `/docs` 가 열립니다.
 - 키가 하나라도 32자 미만이면 서버가 시작하지 않고 몇 번째 키인지 로그에 남깁니다(키 값은 남기지 않음).
 - 키 교체: `APP_API_KEYS=<새 키>,<옛 키>` 로 둘 다 받다가 앱이 모두 새 키로 바뀌면 옛 키를 지웁니다.
-- 환경변수 `APP_API_KEYS` 가 있으면 `.env` 보다 우선합니다. `scripts/demo_call.sh`·`check_locations.py`·`measure_speed.py` 는 첫 번째 키를 헤더에 붙입니다.
+- 환경변수 `APP_API_KEYS` 가 있으면 `.env` 보다 우선합니다. `scripts/check_locations.py`·`measure_speed.py` 는 첫 번째 키를 헤더에 붙입니다.
 
 ## API 요약
 

@@ -13,7 +13,7 @@
 | 5 | (앱) 도착·주차 후 | `reveal` 표시, 도감 저장 |
 
 - 시간 입력은 **목적지까지 편도 운전 시간** `drive_minutes` (15~120분). 예전 `available_minutes` 는 폐기됐다(보내면 400).
-- **가명은 앱 `BlindNames`([`BlindNames.kt`](BlindNames.kt))에서 고른다. 서버 응답의 `blind_name` 은 쓰지 않아도 된다.** (호환을 위해 당분간 같은 100개 목록에서 고른 값을 내려준다.)
+- **가명은 앱이 서버의 `config/alias_pool.yaml` 과 같은 100개 목록을 앱 안에 두고 고른다([7](#7-가명)). 서버 응답의 `blind_name` 은 쓰지 않아도 된다.** (호환을 위해 당분간 같은 목록에서 고른 값을 내려준다.)
 - 서버는 좌표를 저장·로그하지 않는다. 사용자 식별자는 보내지 않는다.
 - **모든 `/api/v1/` 요청에 헤더 `X-API-Key: <앱 API 키>` 를 붙인다**(OkHttp 인터셉터로 한 곳에서, [3](#3-kotlin-gson--retrofit)). 없거나 틀리면 401 `UNAUTHORIZED`. `/healthz` 는 키 없이 된다.
 - 타임아웃 권장: `/keywords` 5초, `/recommend` 10초(호출 1회). 재추천을 포함한 로딩 화면 전체는 **12초** ([2-5](#2-5-로딩-시간과-타임아웃)).
@@ -163,7 +163,7 @@ curl "$BASE/healthz"
 | `straight_km` | 표시하지 않음(디버그용) | 출발지→목적지 직선거리 km (소수 둘째 자리) |
 | `estimated_drive_seconds` | 표시하지 않음(재추천 판단 참고) | 서버 추정 편도 운전시간(초). 도로 경로가 아닌 직선거리 기반 추정이므로 **재추천 여부는 `requestTrip` 의 실제 ETA 로 판단**한다. `retry_context` 로 보정했으면 보정 속도 기준 |
 
-결과 화면 표시 규칙(TEAM_HANDOFF.md '앱 화면(UI)'과 같음)
+힌트 값 표시 규칙
 
 | 서버 값 | 표시 문구 | 조건을 켰을 때 |
 |---|---|---|
@@ -268,6 +268,43 @@ curl "$BASE/healthz"
 ```
 
 `route_content_id` 는 앱이 들고 있는 추천 응답 중 그 `content_id` 의 것으로 안내하라는 뜻이다(`destination`·`reveal` 은 다시 보내지 않는다).
+
+앱 쪽 호출 흐름 (앱은 시간 비교·횟수 세기를 하지 않고 `decision` 만 따른다)
+
+1. `/api/v1/recommend` 로 첫 추천을 받는다.
+2. 그 `destination` 으로 `requestTrip` → ETA(초).
+3. `/api/v1/eta-check` 에 검색 조건 전부 + `content_id`(방금 후보) + ETA + `previous_content_ids`(지금까지 받은 후보 전부, 마지막 = 방금 후보)를 보낸다.
+4. `retry` 면 같이 온 `recommendation` 이 다음 후보다. 2번으로 돌아간다. `accept`·`fallback` 이면 `route_content_id` 의 추천으로 `requestRoute` 안내를 시작한다.
+5. 전체 **12초 제한은 앱이 건다**([2-5](#2-5-로딩-시간과-타임아웃)). 넘으면 마지막으로 받은 추천으로 안내한다.
+
+```kotlin
+val seen = linkedMapOf<String, RecommendResponse>()      // content_id → 추천 (받은 순서 유지)
+var current: RecommendResponse? = null
+
+withTimeoutOrNull(12_000) {                               // 전체 제한 12초 (앱)
+    val first = api.recommend(baseRequest).body() ?: return@withTimeoutOrNull
+    seen[first.reveal.contentId] = first
+    current = first
+    while (true) {
+        val c = current!!
+        val eta = requestTripEtaSeconds(c.destination)   // NaviHelper requestTrip, 초
+        val res = api.etaCheck(baseRequest.toEtaCheck(c.reveal.contentId, eta, seen.keys.toList()))
+            .body() ?: break                              // INVALID_*·UNAUTHORIZED(앱 버그, 로그) → 지금 후보로 안내
+        if (res.decision == "retry") {
+            val next = res.recommendation!!
+            seen[next.reveal.contentId] = next
+            current = next
+        } else {                                          // accept · fallback
+            current = seen[res.routeContentId] ?: c
+            break
+        }
+    }
+}
+// 네트워크 실패(IOException)는 runCatching 등으로 잡아 break 와 같이 처리 → 지금 후보로 안내
+// current 로 requestRoute (12초를 넘겨도 마지막으로 받은 추천). null 이면 에러 처리.
+```
+
+- `baseRequest` 에는 사용자가 켠 조건(`requireParking`, `excludePaid`)이 들어 있어야 한다. `toEtaCheck`([3장](#3-kotlin-gson--retrofit))가 같은 조건을 그대로 옮긴다.
 
 ### 2-4. 자동 재추천 (`retry_context`, 호환용)
 
@@ -579,7 +616,7 @@ object Keyword {
 
 1. **NaviHelper `RouteInfo` 는 위도(`latitude`)가 먼저다. 반드시 이름 붙은 인자로 넘긴다.**
    ```kotlin
-   val blindName = BlindNames.pick(RecentBlindNames.load(prefs))   // RecentBlindNames: TEAM_HANDOFF.md 참고
+   val blindName = BlindNames.pick(recentNames)   // 앱이 들고 있는 100개 목록에서, 최근 쓴 이름은 피해서
    val routeInfo = RouteInfo(
        latitude = res.destination.lat,
        longitude = res.destination.lng,
@@ -591,6 +628,7 @@ object Keyword {
        poiSubId = "",               // 위와 같음
    )
    ```
+   `requestTrip` 에도 `RouteInfo` 를 넘긴다면 같은 규칙으로 `poiName` 은 가명, `address` 는 빈 값으로 넘긴다.
    위치 인자(순서)로 넘기지 않는다. Pleos 문서의 Java 예시는 첫 인자에 경도 값(127.x)을 넣고 있어 문서끼리 순서가 다르게 보이므로, 이름 붙은 인자로 넘기면 순서와 무관하게 안전하다.
    좌표계: 서버 좌표는 WGS84 십진 도로 보인다(경복궁 좌표 대조). NaviHelper 문서에는 좌표계가 명시돼 있지 않으니 에뮬레이터에서 한 번 경로를 띄워 확인할 것.
 2. **이미지(`reveal.image_url`)는 출처 "한국관광공사"를 표시하고, 자르거나 덮지 않는다.** 일부 이미지는 공공누리 제3유형(변경 금지)이다. 썸네일이 필요하면 비율을 유지한 채 축소(`fitCenter`)만 한다. `centerCrop`, 텍스트·그라데이션 오버레이는 쓰지 않는다.
@@ -599,10 +637,8 @@ object Keyword {
 5. 섬 출발: 제주·울릉도·옹진 섬처럼 다리로 이어지지 않은 곳에서 출발하면 같은 섬 안의 장소만 나오고, 육지에서 출발하면 그런 섬은 나오지 않는다(서버 처리).
 6. 서버 기동 직후 몇 초간은 관광지 목록을 받는 중일 수 있다. `/healthz` 의 `index_spots` 가 0 이면 잠시 후 재시도.
 
-## 7. 가명 (`BlindNames.kt`)
+## 7. 가명
 
-- 파일: [`docs/BlindNames.kt`](BlindNames.kt) — `object BlindNames { val LIST: List<String>; fun pick(recent: Collection<String> = emptyList(), random: Random = Random.Default): String }`.
-  패키지명만 앱에 맞게 바꿔 복사한다.
-- `pick(recent)` 은 `recent` 에 없는 이름 중 하나를 무작위로 고른다(모두 최근이면 전체에서). 최근 10개 저장은 `TEAM_HANDOFF.md` 의 `RecentBlindNames`.
-- 목록 100개는 팀이 검수했고 서버 `config/alias_pool.yaml` 과 같다. 서버 테스트가 두 목록의 일치와 금지어(장소 유형어·지명·읍면동, 5~20자) 검증을 매번 검사한다. 목록을 바꿀 때는 두 파일을 함께 바꾼다.
+- 기준 목록은 서버의 `config/alias_pool.yaml`(검수한 100개)이다. 서버는 시작할 때와 테스트에서 이 목록을 금지어(장소 유형어·지명·읍면동, 5~20자) 검증으로 검사한다.
+- 앱은 같은 100개 목록을 앱 안에 두고 직접 고른다(예: `BlindNames.pick(recent)`). 최근에 쓴 이름(예: 10개)은 피해서 같은 이름이 연달아 나오지 않게 한다. 목록을 바꾸면 서버 `alias_pool.yaml` 과 함께 바꾼다.
 - 가명은 블라인드 티켓·도착 알림과 NaviHelper `poiName` 에 쓰고, 도감에는 그날 고른 가명을 저장한다.

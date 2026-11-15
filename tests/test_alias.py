@@ -1,6 +1,5 @@
-"""가명: 검수된 100개 목록(config/alias_pool.yaml) + 앱용 docs/BlindNames.kt + 금지어 검증."""
+"""가명: 검수된 100개 목록(config/alias_pool.yaml) + 금지어 검증."""
 import logging
-import re
 from pathlib import Path
 
 import pytest
@@ -32,14 +31,6 @@ def test_pool_passes_server_validation(settings):
     bad = [(n, validate(n, lx, settings.alias)[1]) for n in settings.alias.pool]
     assert not [b for b in bad if b[1]], [b for b in bad if b[1]]
     make_pool(settings).check()                       # 서버 시작 검사와 같은 경로
-
-
-def test_blindnames_kt_matches_pool(settings):
-    """앱용 docs/BlindNames.kt 의 LIST 가 서버 목록과 순서까지 같다."""
-    kt = (ROOT / "docs" / "BlindNames.kt").read_text(encoding="utf-8")
-    body = kt[kt.index("listOf(") : kt.index(")", kt.index("listOf("))]
-    assert re.findall(r'"([^"]+)"', body) == settings.alias.pool
-    assert "fun pick(recent: Collection<String>" in kt
 
 
 # ---- 서버 시작 검사 ----------------------------------------------------------------

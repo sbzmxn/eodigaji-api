@@ -4,7 +4,7 @@
 
     python scripts/generate_alias_pool.py [--model qwen2.5:7b] [--n 2000] [--exclude reports/alias_confirmed54.json]
 결과: reports/alias_candidates.md (번호 붙은 전체 후보, 검토용, git 제외), reports/alias_candidates.json
-검수를 마친 이름은 config/alias_pool.yaml 과 docs/BlindNames.kt 에 함께 반영한다(테스트가 일치를 검사).
+검수를 마친 이름은 config/alias_pool.yaml 에 반영한다(테스트가 금지어 검증을 검사).
 의존성: requirements.txt 의 httpx (서버와 공용) + 로컬 Ollama 와 생성 모델.
 필요: Ollama(로컬), data/cache 의 관광지 인덱스·법정동 이름(서버를 한 번 띄우면 생긴다). 관광 API 는 부르지 않는다.
 
